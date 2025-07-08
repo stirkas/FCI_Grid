@@ -11,9 +11,6 @@ def main(args):
 
     with open("/home/tirkas1/Workspace/TokData/DIIID/g162940.02944_670", "r", encoding="utf-8") as file:
         gfile = gq_read(file)
-    
-    for item in gfile.items():
-        print(item[0])
 
     R = np.linspace(gfile["rleft"], gfile["rleft"] + gfile["rdim"], gfile["nx"])
     Z = np.linspace(gfile["zmid"] - 0.5 * gfile["zdim"],
