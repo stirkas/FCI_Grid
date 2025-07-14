@@ -171,7 +171,7 @@ def main(args):
     if (R1 == rbdy[sep_idx]): #Need more points at separatrix. Maybe pass angular resolution and do a while loop for points instead.
         zeta_arr *= 1.5
     #Grab wall points to test points in domain.
-    wall_pts   = np.column_stack([rlmt,zlmt])
+    wall_pts = np.column_stack([rlmt,zlmt])
 
     #Trace field lines in both directions.
     print("Tracing field line in positive direction...")
@@ -183,16 +183,18 @@ def main(args):
     fig, ax = plt.subplots(figsize=(6, 8))
     cf = ax.contourf(R, Z, psi.T, levels=100, cmap='viridis')
     plt.colorbar(cf, ax=ax)
-    ax.plot(Rvals_pos, Zvals_pos, '.', color='red',   label='Fld+')
-    ax.plot(Rvals_neg, Zvals_neg, '.', color='white', label='Fld-')
     ax.plot(rbdy, zbdy, '.-', color='orange', label='LCFS')
     ax.plot(rlmt, zlmt, '-', color='black', label='Wall')
+    ax.plot(Rvals_pos, Zvals_pos, '.', color='red',   label='Fld+')
+    ax.plot(Rvals_neg, Zvals_neg, '.', color='white', label='Fld-')
     ax.set_xlabel('R')
     ax.set_ylabel('Z')
     ax.legend()
     ax.grid(True)
     plt.tight_layout()
     plt.show()
+    #fig.savefig('flux_surf.png', dpi=600)
+    #fig.savefig('flux_surf.pdf')
 
 if __name__ == "__main__":
     main(sys.argv[1:])
