@@ -162,12 +162,14 @@ def main(args):
     sep_idx = np.argmax(rbdy)
     #R1, Z1 = R0, Z0               #Magnetic axis
     #R1, Z1 = R[3*nr//4], Z[nz//2] #Core point.
-    #R1, Z1 = rbdy[sep_idx], zbdy[sep_idx]          #Separatrix
-    R1, Z1 = rbdy[sep_idx] + offset, zbdy[sep_idx] #Minor offset from separatrix.
+    R1, Z1 = rbdy[sep_idx], zbdy[sep_idx]          #Separatrix
+    #R1, Z1 = rbdy[sep_idx] + offset, zbdy[sep_idx] #Minor offset from separatrix.
     q1 = float(q_spl(psi_func(R1,Z1)[0,0])) #Getting single point so access output as [0,0].
     #Create toroidal angle array in radians.
     num_zeta = 60
     zeta_arr = np.linspace(0, np.pi, num_zeta + 1)*q1 #q extends to all poloidal angles.
+    if (R1 == rbdy[sep_idx]): #Need more points at separatrix. Maybe pass angular resolution and do a while loop for points instead.
+        zeta_arr *= 1.5
     #Grab wall points to test points in domain.
     wall_pts   = np.column_stack([rlmt,zlmt])
 
