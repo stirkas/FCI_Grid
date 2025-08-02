@@ -91,11 +91,10 @@ def trace_field_line(R0, Z0, zeta_init, zeta_target, field_line_rhs):
         field_line_rhs,
         (zeta_init, zeta_target),
         [R0, Z0],
-        method="RK45",
-        #method='DOP853',
+        method="RK45", #method='DOP853' better for stiff problems
         rtol=1e-10,
         atol=1e-12,
-        dense_output=True #What does this do?
+        dense_output=True #Generates interpolatable data.
     )
 
     #Match what zoidberg does as close as possible.
@@ -114,13 +113,13 @@ def trace_field_line(R0, Z0, zeta_init, zeta_target, field_line_rhs):
 def getCoordinate(R, Z, xind, zind, dx=0, dz=0):
     # Get arrays of indices
     nx = np.shape(R)[0]
-    nz = np.shape(Z)[0]
-    xinds = np.arange(nx * 3)
+    nz = np.shape(Z)[1]
+    xinds = np.arange(nx)
     zinds = np.arange(nz * 3)
         
     # Repeat the data in z, to approximate periodicity
-    R_ext = np.concatenate((R, R, R), axis=0)
-    Z_ext = np.concatenate((Z, Z, Z), axis=0)
+    R_ext = np.concatenate((R, R, R), axis=1)
+    Z_ext = np.concatenate((Z, Z, Z), axis=1)
 
     _spl_r = interpolate.RectBivariateSpline(xinds, zinds, R_ext)
     _spl_z = interpolate.RectBivariateSpline(xinds, zinds, Z_ext)
@@ -136,7 +135,7 @@ def getCoordinate(R, Z, xind, zind, dx=0, dz=0):
 
     return R, Z
 
-def metric(R, Z, nx, nz):
+def get_metric(R, Z, nx, nz):
         #Get arrays of indices.
         xind, zind = np.meshgrid(np.arange(nx), np.arange(nz), indexing="ij")
 
@@ -193,7 +192,9 @@ def metric(R, Z, nx, nz):
             # "J": JB,
         }
 
-def plot(R, Z, psi, ghost, rbdy, zbdy, rlmt, zlmt, sign_b0, Rvals_pos, Zvals_pos, Rvals_neg, Zvals_neg, opoints, xpoints):
+def plot(R, Z, psi, ghost, rbdy, zbdy, rlmt, zlmt, sign_b0,
+        Rvals_pos, Zvals_pos, Rvals_neg, Zvals_neg, opoints, xpoints,
+        checkPts, gridPts, fwdPts, bwdPts):
     #Plot contours, LCFS, wall and field line.
     RR, ZZ = np.meshgrid(R, Z, indexing='ij')
     fig, ax = plt.subplots(figsize=(8,10))
@@ -210,8 +211,19 @@ def plot(R, Z, psi, ghost, rbdy, zbdy, rlmt, zlmt, sign_b0, Rvals_pos, Zvals_pos
     ax.plot(opoints[0][0], opoints[0][1], 'o', label='O',
             markerfacecolor='none', markeredgecolor='lime')
     ax.plot(xpoints[0][0], xpoints[0][1], 'x', color='lime', label='X')
+
+    if checkPts:
+        for idx, point in enumerate(gridPts):
+            x0, y0 = gridPts[idx]
+            xf, yf = fwdPts[idx]
+            xb, yb = bwdPts[idx]
+            ax.plot([x0, xf], [y0, yf], '-', color='red', linewidth=2)
+            ax.plot([x0, xb], [y0, yb], '--', color='cyan', linewidth=2)
+            ax.scatter(x0, y0, color='k', s=100, marker='*', zorder=2)
+
     handles, labels = ax.get_legend_handles_labels()
-    ax.legend(handles, labels, loc='upper center', bbox_to_anchor=(0.5, 1.06),
+    by_label = dict(zip(labels, handles))
+    ax.legend(by_label.values(), by_label.keys(), loc='upper center', bbox_to_anchor=(0.5, 1.06),
             ncol=len(labels), fancybox=True, shadow=True)
     ax.set_xlabel('R')
     ax.set_ylabel('Z')
@@ -241,10 +253,11 @@ def main(args):
     gfile_dir = "/home/tirkas1/Workspace/TokData/DIIID/"
     gfile1 = "g162940.02944_670" #Old ql one.
     gfile2 = "g163241.03500" #Old DIIID one.
-    gfile3 = "g172208.03000" #Ben's test cases.
-    gfile4 = "g174791.03000" #Ben's test cases.
-    gfile5 = "g176413.03000" #Ben's test cases.
-    gfile6 = "g176312.03000" #Ben's test cases.
+    #Ben's test cases for varying Ip and B0 directions.
+    gfile3 = "g172208.03000"
+    gfile4 = "g174791.03000"
+    gfile5 = "g176413.03000"
+    gfile6 = "g176312.03000"
     gfilename = gfile1
     gfilepath = gfile_dir + gfilename
     print("Reading EQDSK file...")
@@ -302,8 +315,8 @@ def main(args):
     ghosts_lo_R, ghosts_hi_R = R[0] - dR*np.arange(rpad, 0, -1), R[-1] + dR*np.arange(1, rpad + 1)
     ghosts_lo_Z, ghosts_hi_Z = Z[0] - dZ*np.arange(zpad, 0, -1), Z[-1] + dZ*np.arange(1, zpad + 1)
     #Replace R and Z with padded arrays.
-    R = np.concatenate((ghosts_lo_R, R, ghosts_hi_R)) 
-    Z = np.concatenate((ghosts_lo_Z, Z, ghosts_hi_Z)) 
+    R = np.concatenate((ghosts_lo_R, R, ghosts_hi_R))
+    Z = np.concatenate((ghosts_lo_Z, Z, ghosts_hi_Z))
 
     #Calculate field components following COCOS.
     #TODO: Make R and Z 2D so don't have to put [:, None] everywhere?
@@ -355,12 +368,15 @@ def main(args):
     for points in xpoints[:]:
         if not wall_path.contains_point((points[0], points[1])):
             xpoints.remove(points)
-    #TODO: Figure out separatrix scenario.
-    ixseps = nr + 1
-    #Use ixseps1 = xpoints[0](R), ixseps2 = nx + 1?
+
+    #TODO: Include guard points? zoidberg adds +1 but BOUT++ docs say default to nx.
+    ixseps1 = ixseps2 = nrp #Default to all points contained in closed flux region.
+    if len(xpoints) >= 1:
+        ixseps1 = np.argmin(np.abs(R - xpoints[0][0]))
+    if len(xpoints) >= 2:
+        ixseps2 = np.argmin(np.abs(R - xpoints[1][0]))
 
     #Trace field lines in both directions.
-    #TODO: Trace whole grid forward and backward once.
     print("Tracing field line in forward direction...")
     Rvals_pos, Zvals_pos = trace_until_wall(R1, Z1, zeta_arr, field_line_rhs,
                                          wall_path, direction=sign_b0)
@@ -368,6 +384,40 @@ def main(args):
     print("Tracing field line in backward direction...")
     Rvals_neg, Zvals_neg = trace_until_wall(R1, Z1, zeta_arr, field_line_rhs,
                                          wall_path, direction=-sign_b0)
+
+    #Trace all grid points once back and forth.
+    #Use low-res toroidal distance.
+    phi_dist = np.pi/16
+    RR, ZZ = np.meshgrid(R,Z,indexing='ij')
+    gridPts = np.column_stack((RR.ravel(), ZZ.ravel()))
+    fwdPts = np.zeros_like(gridPts)
+    bwdPts = np.zeros_like(gridPts)
+    print("Generating forward and backward points on whole grid...")
+    for idx, (r0, z0) in enumerate(gridPts):
+        sol = trace_field_line(r0, z0, phi_val,
+                            sign_b0*phi_dist, field_line_rhs)
+        fwdPts[idx, 0], fwdPts[idx, 1] = sol.y[0, -1], sol.y[1, -1]
+        sol = trace_field_line(r0, z0, phi_val,
+                            -sign_b0*phi_dist, field_line_rhs)
+        bwdPts[idx, 0], bwdPts[idx, 1] = sol.y[0, -1], sol.y[1, -1]
+
+    #Convert mapping points back to 2d arrays.
+    #TODO: Need to double check zoidberg generates points from bottom left up then right.
+    Rfwd = fwdPts[:,0].reshape(nrp, nzp)
+    Zfwd = fwdPts[:,1].reshape(nrp, nzp)
+    Rbwd = bwdPts[:,0].reshape(nrp, nzp)
+    Zbwd = bwdPts[:,1].reshape(nrp, nzp)
+
+    #Plot points scattered to test grid point following in general.
+    step = 100
+    indices = np.arange(0, gridPts.shape[0], step)
+    gridPtsFinal = gridPts[indices]
+    fwdPtsFinal = fwdPts[indices]
+    bwdPtsFinal = bwdPts[indices]
+    #Remove points outside the wall for all three arrays at once.
+    kept = [(g, f, b) for (g, f, b) in zip(gridPtsFinal, fwdPtsFinal, bwdPtsFinal)
+            if wall_path.contains_point((g[0], g[1]))]
+    gridPtsFinal, fwdPtsFinal, bwdPtsFinal = map(list, zip(*kept))
 
     #Generate metric and maps and so on to write out for BSTING.
     #TODO: Generate basic weights and eventually anti-symmetric weights.
@@ -382,10 +432,10 @@ def main(args):
         "Z": Z3,
         "MXG": rpad,
         "MYG": phipad,
-        "forward_R": R3,
-        "forward_Z": Z3,
-        "backward_R": R3,
-        "backward_Z": Z3,
+        "forward_R": Rfwd[:,np.newaxis,:],
+        "forward_Z": Zfwd[:,np.newaxis,:],
+        "backward_R": Rbwd[:,np.newaxis,:],
+        "backward_Z": Zbwd[:,np.newaxis,:],
         "forward_xt_prime": -1*np.ones_like(R3),
         "forward_zt_prime": -1*np.ones_like(R3),
         "backward_xt_prime": -1*np.ones_like(R3),
@@ -396,6 +446,7 @@ def main(args):
     #Note: No g12 or g23?
     #TODO: Add forward and backward metric.
     R2 = R3[:,:,0]
+    metric = get_metric(R3[:,0,:], Z3[:,0,:], nrp, nzp)
     metric = {
         "dx": np.full_like(R2, R[1]-R[0]),
         "dy": np.full_like(R2, zeta_arr[1]-zeta_arr[0]),
@@ -419,8 +470,8 @@ def main(args):
         f.write_file_attribute("software_name", "zoidberg")
         f.write_file_attribute("software_version", __version__)
         grid_id = str(uuid.uuid1())
-        f.write_file_attribute("id", grid_id)  # conventional name
-        f.write_file_attribute("grid_id", grid_id)  # BOUT++ specific name
+        f.write_file_attribute("id", grid_id)      #Conventional name
+        f.write_file_attribute("grid_id", grid_id) #BOUT++ specific name
 
         f.write("nx", nr)
         f.write("ny", nphi)
@@ -430,24 +481,19 @@ def main(args):
         f.write("dy", metric["dy"])
         f.write("dz", metric["dz"])
 
-        f.write("ixseps1", ixseps)
-        f.write("ixseps2", ixseps)
+        f.write("ixseps1", ixseps1)
+        f.write("ixseps2", ixseps2)
 
-        # Metric tensor
         for key, value in metric.items():
             f.write(key, value)
 
-        # Magnetic field
         f.write("B", Bmag[:,np.newaxis,:])
 
-        # Pressure
         f.write("pressure", pres[:,np.newaxis,:])
 
-        # Attributes
         for key, value in attributes.items():
             f.write(key, value)
 
-        # Maps - write everything to file
         for key, value in maps.items():
             f.write(key, value)
 
@@ -465,10 +511,11 @@ def main(args):
                      linewidth=1.5)
 
     plotting = True
+    checkPts = True
     if (plotting):
         plot(R, Z, psi, ghost, rbdy, zbdy, rlmt, zlmt,
             sign_b0, Rvals_pos, Zvals_pos, Rvals_neg, Zvals_neg,
-            opoints, xpoints)
+            opoints, xpoints, checkPts, gridPtsFinal, fwdPtsFinal, bwdPtsFinal)
 
 if __name__ == "__main__":
     main(sys.argv[1:])
