@@ -7,6 +7,7 @@ from matplotlib import path as path
 from matplotlib import pyplot as plt
 from matplotlib.patches import Rectangle
 from scipy import integrate,interpolate
+from scipy.spatial import cKDTree as KDTree
 import numpy as np
 
 from boututils import datafile as bdata
@@ -53,33 +54,36 @@ def setup_field_line_interpolation(R_grid, Z_grid, dRdphi, dZdphi, linear=0):
     
     return field_line_rhs
 
-def trace_until_wall(R0, Z0, zeta_arr, field_line_rhs, wall_path, direction=1):
+def trace_until_wall(R0, Z0, phi_init, dphi, field_line_rhs, wall_path, direction=1):
     """
-    Trace a field line starting at (R0,Z0) along the toroidal angles in zeta_arr,
-    in the given direction (+1 or -1), stopping as soon as the point exits wall_path.
+    Trace a field line starting at (R0, Z0) from phi_init in steps of dphi
+    (sign given by direction), stopping as soon as the point exits wall_path.
     """
-
     Rvals = [R0]
     Zvals = [Z0]
 
-    #Loop over each segment in zeta_arr.
-    for i in range(len(zeta_arr) - 1):
-        z0 = direction * zeta_arr[i]
-        z1 = direction * zeta_arr[i + 1]
+    phi_current = phi_init
 
+    while True:
+        # advance one step in phi
+        phi_next = phi_current + direction*dphi
+
+        # trace from phi_current → phi_next
         sol = trace_field_line(
             Rvals[-1], Zvals[-1],
-            z0, z1,
+            phi_current, phi_next,
             field_line_rhs
         )
         Rn, Zn = sol.y[0, -1], sol.y[1, -1]
 
-        #Stop if that new point lies outside the wall.
+        # stop if we’ve left the wall
         if not wall_path.contains_point((Rn, Zn)):
             break
 
+        # otherwise record and continue
         Rvals.append(Rn)
         Zvals.append(Zn)
+        phi_current = phi_next
 
     return Rvals, Zvals
 
@@ -96,17 +100,6 @@ def trace_field_line(R0, Z0, zeta_init, zeta_target, field_line_rhs):
         atol=1e-12,
         dense_output=True #Generates interpolatable data.
     )
-
-    #Match what zoidberg does as close as possible.
-    #sol = integrate.solve_ivp(
-    #    field_line_rhs,
-    #    (0, zeta_target),
-    #    [R0, Z0],
-    #    method='LSODA',   # Match odeint default
-    #    rtol=1.49012e-8,  # Match odeint default
-    #    atol=1.49012e-11, # Match odeint default
-    #    dense_output=False
-    #)
     
     return sol
 
@@ -115,11 +108,11 @@ def getCoordinate(R, Z, xind, zind, dx=0, dz=0):
     nx = np.shape(R)[0]
     nz = np.shape(Z)[1]
     xinds = np.arange(nx)
-    zinds = np.arange(nz * 3)
+    zinds = np.arange(nz) # * 3)
         
     # Repeat the data in z, to approximate periodicity
-    R_ext = np.concatenate((R, R, R), axis=1)
-    Z_ext = np.concatenate((Z, Z, Z), axis=1)
+    R_ext = R #np.concatenate((R, R, R), axis=1)
+    Z_ext = Z #np.concatenate((Z, Z, Z), axis=1)
 
     _spl_r = interpolate.RectBivariateSpline(xinds, zinds, R_ext)
     _spl_z = interpolate.RectBivariateSpline(xinds, zinds, Z_ext)
@@ -127,70 +120,198 @@ def getCoordinate(R, Z, xind, zind, dx=0, dz=0):
     nx, nz = R.shape
     if (np.amin(xind) < 0) or (np.amax(xind) > nx - 1):
         raise ValueError("x index out of range")
-    
-    # Periodic in y
+    if (np.amin(zind) < 0) or (np.amax(zind) > nz - 1):
+        raise ValueError("z index out of range")
+
+    # Periodic in y (TODO: Z is not y!)
     zind = np.remainder(zind, nz)
-    R = _spl_r(xind, zind + nz, dx=dx, dy=dz, grid=False)
-    Z = _spl_z(xind, zind + nz, dx=dx, dy=dz, grid=False)
+    #R = _spl_r(xind, zind + nz, dx=dx, dy=dz, grid=False)
+    #Z = _spl_z(xind, zind + nz, dx=dx, dy=dz, grid=False)
+
+    R = _spl_r(xind, zind, dx=dx, dy=dz, grid=False)
+    Z = _spl_z(xind, zind, dx=dx, dy=dz, grid=False)
 
     return R, Z
 
-def get_metric(R, Z, nx, nz):
-        #Get arrays of indices.
-        xind, zind = np.meshgrid(np.arange(nx), np.arange(nz), indexing="ij")
+def get_metric(R, Z, nx, nz, nxpad, nzpad):
+    #Get arrays of indices.
+    xind, zind = np.meshgrid(np.arange(nx), np.arange(nz), indexing="ij")
 
-        # Calculate the gradient along each coordinate.
-        dolddnew = np.array(
-            [getCoordinate(R, Z, xind, zind, dx=a, dz=b) for a, b in ((1, 0), (0, 1))]
-        )
-        # dims: 0 : dx or dz?
-        #       1 : R or z?
-        #       2 : spatial: r
-        #       3 : spatial: \theta
-        ddist = np.sqrt(np.sum(dolddnew**2, axis=1))  # sum R + z
-        nx, nz = ddist.shape[1:]
-        ddist[0] = 1 / nx
-        ddist[1] = 1 / nz
-        dolddnew /= ddist[:, None, ...]
+    #Calculate the gradient along each coordinate.
+    dolddnew = np.array(
+        [getCoordinate(R, Z, xind, zind, dx=a, dz=b) for a, b in ((1, 0), (0, 1))]
+    )
+    #Dims: 0 : dx or dz?
+    #      1 : R or z?
+    #      2 : spatial: r
+    #      3 : spatial: \theta
+    ddist = np.sqrt(np.sum(dolddnew**2, axis=1)) #Sum R + Z
+    nx, nz = ddist.shape[1:]
+    ddist[0] = 1 / (nx - 2*nxpad - 1)
+    ddist[1] = 1 / (nz - 2*nzpad - 1)
+    dolddnew /= ddist[:,None,...]
 
-        # g_ij = J_ki J_kj
-        # (2.5.27) from D'Haeseleer 1991
-        # Note: our J is transposed
-        J = dolddnew
-        g = np.sum(
-            np.array(
-                [
-                    [[J[j, i] * J[k, i] for i in range(2)] for j in range(2)]
-                    for k in range(2)
-                ]
-            ),
-            axis=2,
-        )
+    #g_ij = J_ki J_kj
+    #(2.5.27) from D'Haeseleer 1991
+    #Note: our J is transposed
+    J = dolddnew
+    g = np.sum(
+        np.array(
+            [
+                [[J[j, i] * J[k, i] for i in range(2)] for j in range(2)]
+                for k in range(2)
+            ]
+        ),
+        axis=2,
+    )
 
-        assert np.all(
-            g[0, 0] > 0
-        ), f"g[0, 0] is expected to be positive, but some values are not (minimum {np.min(g[0, 0])})"
-        assert np.all(
-            g[1, 1] > 0
-        ), f"g[1, 1] is expected to be positive, but some values are not (minimum {np.min(g[1, 1])})"
-        g = g.transpose(2, 3, 0, 1)
-        assert np.all(
-            np.linalg.det(g) > 0
-        ), f"All determinants of g should be positive, but some are not (minimum {np.min(np.linalg.det(g))})"
-        ginv = np.linalg.inv(g)
-        # Jacobian from BOUT++
-        JB = R * (J[0, 0] * J[1, 1] - J[0, 1] * J[1, 0])
-        return {
-            "dx": ddist[0],
-            "dz": ddist[1],  # Grid spacing
-            "gxx": ginv[..., 0, 0],
-            "g_xx": g[..., 0, 0],
-            "gxz": ginv[..., 0, 1],
-            "g_xz": g[..., 0, 1],
-            "gzz": ginv[..., 1, 1],
-            "g_zz": g[..., 1, 1],
-            # "J": JB,
-        }
+    assert np.all(
+        g[0, 0] > 0
+    ), f"g[0, 0] is expected to be positive, but some values are not (minimum {np.min(g[0, 0])})"
+    assert np.all(
+        g[1, 1] > 0
+    ), f"g[1, 1] is expected to be positive, but some values are not (minimum {np.min(g[1, 1])})"
+    g = g.transpose(2, 3, 0, 1)
+    assert np.all(
+        np.linalg.det(g) > 0
+    ), f"All determinants of g should be positive, but some are not (minimum {np.min(np.linalg.det(g))})"
+    ginv = np.linalg.inv(g)
+    #Jacobian from BOUT++
+    JB = R * (J[0, 0] * J[1, 1] - J[0, 1] * J[1, 0])
+    return {
+        "dx": ddist[0],
+        "dz": ddist[1], #Grid spacing
+        "gxx": ginv[..., 0, 0],
+        "g_xx": g[..., 0, 0],
+        "gxz": ginv[..., 0, 1],
+        "g_xz": g[..., 0, 1],
+        "gzz": ginv[..., 1, 1],
+        "g_zz": g[..., 1, 1],
+        #"J": JB,
+    }
+
+def findIndex(R, Z, tol=1e-10, show=False):
+    """Finds the (x, z) index corresponding to the given (R, Z) coordinate
+
+    Parameters
+    ----------
+    R, Z : array_like
+        Locations. Can be scalar or array, must be the same shape
+    tol : float, optional
+        Maximum tolerance on the square distance
+
+    Returns
+    -------
+    x, z : (ndarray, ndarray)
+        Index as a float, same shape as R, Z
+
+    """
+
+    # Make sure inputs are NumPy arrays
+    origR = R
+    origZ = Z
+    R = np.asarray(R)
+    Z = np.asarray(Z)
+
+    # Check that they have the same shape
+    assert R.shape == Z.shape
+
+    input_shape = R.shape  # So output has same shape as input
+
+    # Get distance and index into flattened data
+    # Note ind can be an integer, or an array of ints
+    # with the same number of elements as the input (R,Z) arrays
+    n = R.size
+    position = np.concatenate((R.reshape((n, 1)), Z.reshape((n, 1))), axis=1)
+
+    R = R.reshape((n,))
+    Z = Z.reshape((n,))
+    tree = KDTree(position)
+    dists, ind = tree.query(position)
+
+    # Calculate (x,y) index
+    nx, nz = origR.shape
+    xind = np.floor_divide(ind, nz)
+    zind = ind - xind * nz
+
+    # Convert indices to float
+    xind = np.asarray(xind, dtype=float)
+    zind = np.asarray(zind, dtype=float)
+
+    # Create a mask for the positions
+    mask = np.ones(xind.shape)
+    mask[np.logical_or((xind < 0.5), (xind > (nx - 1.5)))] = (
+        0.0  # Set to zero if near the boundary
+    )
+
+    if show:
+        plt.plot(origR, origZ, ".")
+        plt.plot(R, Z, "x")
+
+    cnt = 0
+    underrelax = 1
+
+    while True:
+        # Use Newton iteration to find the index
+        # dR, dZ are the distance away from the desired point
+        Rpos, Zpos = getCoordinate(origR, origZ, xind, zind)
+        if show:
+            plt.plot(Rpos, Zpos, "o")
+        dR = Rpos - R
+        dZ = Zpos - Z
+
+        # Check if close enough
+        # Note: only check the points which are not in the boundary
+        val = np.amax(mask * (dR**2 + dZ**2))
+        if val < tol:
+            break
+        cnt += 1
+        if cnt == 10:
+            underrelax = 1.5
+        if cnt == 100:
+            underrelax = 2
+        if cnt == 300:
+            underrelax = 2.5
+        if cnt == 700:
+            underrelax = 3
+        if cnt == 1000:
+            raise RuntimeError("Failed to converge")
+
+        # Calculate derivatives
+        dRdx, dZdx = getCoordinate(origR, origZ, xind, zind, dx=1)
+        dRdz, dZdz = getCoordinate(origR, origZ, xind, zind, dz=1)
+
+        # Invert 2x2 matrix to get change in coordinates
+        #
+        # (x) -=  ( dR/dx   dR/dz )^-1  (dR)
+        # (y)     ( dZ/dx   dZ/dz )     (dz)
+        #
+        #
+        # (x) -=  ( dZ/dz  -dR/dz ) (dR)
+        # (y)     (-dZ/dx   dR/dx ) (dZ) / (dR/dx*dZ/dy - dR/dy*dZ/dx)
+        determinant = dRdx * dZdz - dRdz * dZdx
+
+        xind -= mask * ((dZdz * dR - dRdz * dZ) / determinant / underrelax)
+        zind -= mask * ((dRdx * dZ - dZdx * dR) / determinant / underrelax)
+
+        # Re-check for boundary
+        in_boundary = xind < 0.5
+        mask[in_boundary] = 0.0  # Set to zero if near the boundary
+        xind[in_boundary] = 0.0
+        out_boundary = xind > (nx - 1.5)
+        mask[out_boundary] = 0.0  # Set to zero if near the boundary
+        xind[out_boundary] = nx - 1
+
+    if show:
+        plt.show()
+
+    # Set xind to -1 if in the inner boundary, nx if in outer boundary
+    in_boundary = xind < 0.5
+    xind[in_boundary] = -1
+    out_boundary = xind > (nx - 1.5)
+    xind[out_boundary] = nx
+
+    return xind.reshape(input_shape), zind.reshape(input_shape)
 
 def plot(R, Z, psi, ghost, rbdy, zbdy, rlmt, zlmt, sign_b0,
         Rvals_pos, Zvals_pos, Rvals_neg, Zvals_neg, opoints, xpoints,
@@ -208,9 +329,11 @@ def plot(R, Z, psi, ghost, rbdy, zbdy, rlmt, zlmt, sign_b0,
     ax.plot(Rvals_pos, Zvals_pos, '.', color='red',  label='$+B_{\\phi} = ' + phi_dir     + '\\phi$')
     ax.plot(Rvals_neg, Zvals_neg, '.', color='cyan', label='$-B_{\\phi} = ' + neg_phi_dir + '\\phi$')
     #Plotting assuming one x-point at the moment.
-    ax.plot(opoints[0][0], opoints[0][1], 'o', label='O',
-            markerfacecolor='none', markeredgecolor='lime')
-    ax.plot(xpoints[0][0], xpoints[0][1], 'x', color='lime', label='X')
+    for point in opoints:
+        ax.plot(point[0], point[1], 'o', label='O',
+                markerfacecolor='none', markeredgecolor='lime')
+    for point in xpoints:
+        ax.plot(point[0], point[1], 'x', color='lime', label='X')
 
     if checkPts:
         for idx, point in enumerate(gridPts):
@@ -305,6 +428,7 @@ def main(args):
     #Generate simulation grid (lower res + guard cells)
     rpad, phipad, zpad = 2,1,0 #0 #Padding/ghost cells in R. No padding in Z, and 1 in Y according to zoidberg, why?
     grid_res = 64
+    dphi = 2*np.pi/16
     nr, nphi, nz = grid_res, 1, grid_res
     nrp, nzp = nr + 2*rpad, nz + 2*zpad
     phi_val = 0 #Take phi=0 to be reference point.
@@ -317,20 +441,20 @@ def main(args):
     #Replace R and Z with padded arrays.
     R = np.concatenate((ghosts_lo_R, R, ghosts_hi_R))
     Z = np.concatenate((ghosts_lo_Z, Z, ghosts_hi_Z))
+    RR, ZZ = np.meshgrid(R,Z,indexing='ij')
 
-    #Calculate field components following COCOS.
-    #TODO: Make R and Z 2D so don't have to put [:, None] everywhere?
-    Bp_R  =  sign_ip*psi_func(R, Z, dy=1)/R[:, None]
-    Bp_Z  = -sign_ip*psi_func(R, Z, dx=1)/R[:, None]
-    Bp    = np.sqrt(Bp_R**2 + Bp_Z**2)
-    Bphi  = f_spl(psi_func(R, Z))/R[:, None]
+    #Calculate field components following COCOS convention.
+    Bp_R =  sign_ip*psi_func(R, Z, dy=1)/RR
+    Bp_Z = -sign_ip*psi_func(R, Z, dx=1)/RR
+    Bp   = np.sqrt(Bp_R**2 + Bp_Z**2)
+    Bphi = f_spl(psi_func(R, Z))/RR
     Bmag = np.sqrt(Bp_R**2 + Bp_Z**2 + Bphi**2)
     pres = p_spl(psi_func(R,Z))
 
     #Copmute derivatives along phi NOT B_phi. So need to pass field line direction when following below.
     #R factor comes from cylindrical geometry.
-    dRdphi = R[:,None] * Bp_R / Bphi
-    dZdphi = R[:,None] * Bp_Z / Bphi
+    dRdphi = RR * Bp_R / Bphi
+    dZdphi = RR * Bp_Z / Bphi
 
     #Set up interpolation
     print("Setting up interpolation...")
@@ -338,21 +462,20 @@ def main(args):
     field_line_rhs = setup_field_line_interpolation(R, Z, dRdphi, dZdphi)
     #field_line_rhs_lin = setup_field_line_interpolation(R, Z, dRphi, dZphi, linear=1)
 
-    #Choose a starting point.
+    #Choose a starting point for tracing single field line.
     offset = 0.005
     sep_idx = np.argmax(rbdy)
     #R1, Z1 = R0, Z0               #Magnetic axis
     #R1, Z1 = R[3*nr//4], Z[nz//2] #Core point.
     #R1, Z1 = R[7*nr//8], Z[nz//2] #Outer point.
-    #R1, Z1 = rbdy[sep_idx], zbdy[sep_idx]          #Separatrix
+    #R1, Z1 = rbdy[sep_idx], zbdy[sep_idx]         #Separatrix
     R1, Z1 = rbdy[sep_idx] + offset, zbdy[sep_idx] #Minor offset from separatrix.
     #R1, Z1 = np.min(R), Z[nz//2]
-    q1 = q_spl(psi_func(R1,Z1)[0,0]) #Getting single point so access output as [0,0].
     #Create toroidal angle array in radians.
-    num_zeta = 180
-    zeta_arr = np.linspace(0, np.pi, num_zeta + 1)*q1 #q extends to all poloidal angles.
-    if (R1 == rbdy[sep_idx]): #Need more points at separatrix. Maybe pass angular resolution and do a while loop for points instead.
-        zeta_arr *= 1.5
+    #q1 = q_spl(psi_func(R1,Z1)[0,0]) #Getting single point so access output as [0,0].
+    #zeta_arr = np.linspace(0, np.pi, num_zeta + 1)*q1 #q extends to all poloidal angles.
+    #if (R1 == rbdy[sep_idx]): #Need more points at separatrix. Maybe pass angular resolution and do a while loop for points instead.
+    #    zeta_arr *= 1.5
     #Grab wall points to test points in domain.
     wall_pts = np.column_stack([rlmt,zlmt])
     wall_path = path.Path(wall_pts, closed=True)
@@ -362,6 +485,7 @@ def main(args):
     opoints, xpoints = fc(R2D, Z2D, psi, sep_atol, sep_maxits)
     #Remove points outside the wall. Not enough to remove all non-important points it turns out.
     #TODO: Can try removing points within certain flux surface outside of LCFS?
+    #TODO: Should index be closest index to separatrix? Or lower value.
     for points in opoints[:]:
         if not wall_path.contains_point((points[0], points[1])):
             opoints.remove(points)
@@ -369,7 +493,6 @@ def main(args):
         if not wall_path.contains_point((points[0], points[1])):
             xpoints.remove(points)
 
-    #TODO: Include guard points? zoidberg adds +1 but BOUT++ docs say default to nx.
     ixseps1 = ixseps2 = nrp #Default to all points contained in closed flux region.
     if len(xpoints) >= 1:
         ixseps1 = np.argmin(np.abs(R - xpoints[0][0]))
@@ -378,31 +501,28 @@ def main(args):
 
     #Trace field lines in both directions.
     print("Tracing field line in forward direction...")
-    Rvals_pos, Zvals_pos = trace_until_wall(R1, Z1, zeta_arr, field_line_rhs,
+    Rvals_pos, Zvals_pos = trace_until_wall(R1, Z1, phi_val, dphi, field_line_rhs,
                                          wall_path, direction=sign_b0)
     #Rvals_pos_lin, Zvals_pos_lin = trace_until_wall(R1, Z1, zeta_arr, field_line_rhs_lin, wall_pts, direction=sign_b0)
     print("Tracing field line in backward direction...")
-    Rvals_neg, Zvals_neg = trace_until_wall(R1, Z1, zeta_arr, field_line_rhs,
+    Rvals_neg, Zvals_neg = trace_until_wall(R1, Z1, phi_val, dphi, field_line_rhs,
                                          wall_path, direction=-sign_b0)
 
     #Trace all grid points once back and forth.
     #Use low-res toroidal distance.
-    phi_dist = np.pi/16
-    RR, ZZ = np.meshgrid(R,Z,indexing='ij')
     gridPts = np.column_stack((RR.ravel(), ZZ.ravel()))
     fwdPts = np.zeros_like(gridPts)
     bwdPts = np.zeros_like(gridPts)
     print("Generating forward and backward points on whole grid...")
     for idx, (r0, z0) in enumerate(gridPts):
         sol = trace_field_line(r0, z0, phi_val,
-                            sign_b0*phi_dist, field_line_rhs)
+                            sign_b0*dphi, field_line_rhs)
         fwdPts[idx, 0], fwdPts[idx, 1] = sol.y[0, -1], sol.y[1, -1]
         sol = trace_field_line(r0, z0, phi_val,
-                            -sign_b0*phi_dist, field_line_rhs)
+                            -sign_b0*dphi, field_line_rhs)
         bwdPts[idx, 0], bwdPts[idx, 1] = sol.y[0, -1], sol.y[1, -1]
 
     #Convert mapping points back to 2d arrays.
-    #TODO: Need to double check zoidberg generates points from bottom left up then right.
     Rfwd = fwdPts[:,0].reshape(nrp, nzp)
     Zfwd = fwdPts[:,1].reshape(nrp, nzp)
     Rbwd = bwdPts[:,0].reshape(nrp, nzp)
@@ -415,18 +535,21 @@ def main(args):
     fwdPtsFinal = fwdPts[indices]
     bwdPtsFinal = bwdPts[indices]
     #Remove points outside the wall for all three arrays at once.
-    kept = [(g, f, b) for (g, f, b) in zip(gridPtsFinal, fwdPtsFinal, bwdPtsFinal)
+    keptPts = [(g, f, b) for (g, f, b) in zip(gridPtsFinal, fwdPtsFinal, bwdPtsFinal)
             if wall_path.contains_point((g[0], g[1]))]
-    gridPtsFinal, fwdPtsFinal, bwdPtsFinal = map(list, zip(*kept))
+    gridPtsFinal, fwdPtsFinal, bwdPtsFinal = map(list, zip(*keptPts))
 
     #Generate metric and maps and so on to write out for BSTING.
-    #TODO: Generate basic weights and eventually anti-symmetric weights.
+    print("Generating metric and map data for output file...")
+    #TODO: Generate interpolation weights per zoidberg? Can run BSTING without it first and add later.
     attributes = {
         "psi": psi[:, np.newaxis, :]
     }
     #Need to do this all in 3D now, didn't need the complication before.
-    #TODO Map back and forward R,Z. And fix xt/zt primes? Shouldn't all be -1, test old gfile.
     R3, phi3, Z3 = np.meshgrid(R, phi_val, Z, indexing='ij')
+    fwd_xtp, fwd_ztp = findIndex(Rfwd, Zfwd) #, show=True)
+    bwd_xtp, bwd_ztp = findIndex(Rbwd, Zbwd) #, show=True)
+
     maps = {
         "R": R3,
         "Z": Z3,
@@ -436,31 +559,55 @@ def main(args):
         "forward_Z": Zfwd[:,np.newaxis,:],
         "backward_R": Rbwd[:,np.newaxis,:],
         "backward_Z": Zbwd[:,np.newaxis,:],
-        "forward_xt_prime": -1*np.ones_like(R3),
-        "forward_zt_prime": -1*np.ones_like(R3),
-        "backward_xt_prime": -1*np.ones_like(R3),
-        "backward_zt_prime": -1*np.ones_like(R3)
-
+        "forward_xt_prime": fwd_xtp,
+        "forward_zt_prime": fwd_ztp,
+        "backward_xt_prime": bwd_xtp,
+        "backward_zt_prime": bwd_ztp
     }
-    #Store metric info. Note metric is expected 2D (R,phi) not 3D.
-    #Note: No g12 or g23?
-    #TODO: Add forward and backward metric.
-    R2 = R3[:,:,0]
-    metric = get_metric(R3[:,0,:], Z3[:,0,:], nrp, nzp)
+
+    #Store metric info. Note tokamak example in zoidberg removes Z dim for some reason (2D)...
+    #Note gyy/g^yy not normalized as gxx and gzz are. Normalize all planes here for x and z coeffs.
+    #Note: No gxy, gzy pieces, because orthogonal, but x and z cells curved so gxz matters?
+    #TODO: Does Bphi/B factor in gyy matter??? Not according to BSTING paper. Do I need J on here?
+    ctr_metric = get_metric(R3[:,0,:], Z3[:,0,:], nrp, nzp, rpad, zpad)
+    fwd_metric = get_metric(Rfwd, Zfwd, nrp, nzp, rpad, zpad)
+    bwd_metric = get_metric(Rbwd, Zbwd, nrp, nzp, rpad, zpad)
     metric = {
-        "dx": np.full_like(R2, R[1]-R[0]),
-        "dy": np.full_like(R2, zeta_arr[1]-zeta_arr[0]),
-        "dz": Z[1]-Z[0],
-        "g11": np.ones_like(R2),
-        "g_11": np.ones_like(R2),
-        "g13": np.zeros_like(R2),
-        "g_13": np.zeros_like(R2),
-        "g22": 1/(R2**2),
-        "g_22": R2**2,
-        "g33": np.ones_like(R2),
-        "g_33": np.ones_like(R2),
-        "Rxy": R2,
-        "Bxy": Bmag[:,np.newaxis,0]
+        "Rxy": R3,
+        "Bxy": Bmag,
+        "dx": ctr_metric["dx"][:,np.newaxis,:],
+        "dy": np.full_like(R3, dphi),
+        "dz": ctr_metric["dz"][:,np.newaxis,:],
+        "g11": ctr_metric["gxx"][:,np.newaxis,:],
+        "g_11": ctr_metric["gxx"][:,np.newaxis,:],
+        "g13": ctr_metric["gxz"][:,np.newaxis,:],
+        "g_13": ctr_metric["g_xz"][:,np.newaxis,:],
+        "g22": 1/(R3**2),
+        "g_22": R3**2,
+        "g33": ctr_metric["gzz"][:,np.newaxis,:],
+        "g_33": ctr_metric["g_zz"][:,np.newaxis,:],
+        "forward_dx": fwd_metric["dx"][:,np.newaxis,:],
+        "forward_dy": np.full_like(R3, dphi),
+        "forward_dz": fwd_metric["dz"][:,np.newaxis,:],
+        "forward_g11": fwd_metric["gxx"][:,np.newaxis,:],
+        "forward_g_11": fwd_metric["gxx"][:,np.newaxis,:],
+        "forward_g13": fwd_metric["gxz"][:,np.newaxis,:],
+        "forward_g_13": fwd_metric["g_xz"][:,np.newaxis,:],
+        "forward_g22": 1/(R3**2),
+        "forward_g_22": R3**2,
+        "forward_g33": fwd_metric["gzz"][:,np.newaxis,:],
+        "forward_g_33": fwd_metric["g_zz"][:,np.newaxis,:],
+        "backward_dx": bwd_metric["dx"][:,np.newaxis,:],
+        "backward_dy": np.full_like(R3, dphi),
+        "backward_dz": bwd_metric["dz"][:,np.newaxis,:],
+        "backward_g11": bwd_metric["gxx"][:,np.newaxis,:],
+        "backward_g_11": bwd_metric["gxx"][:,np.newaxis,:],
+        "backward_g13": bwd_metric["gxz"][:,np.newaxis,:],
+        "backward_g_13": bwd_metric["g_xz"][:,np.newaxis,:],
+        "backward_g22": 1/(R3**2),
+        "backward_g_22": R3**2,
+        "backward_g33": bwd_metric["gzz"][:,np.newaxis,:],
+        "backward_g_33": bwd_metric["g_zz"][:,np.newaxis,:]
     }
 
     #Write output to data file.
