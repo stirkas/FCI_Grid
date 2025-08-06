@@ -104,6 +104,7 @@ def trace_field_line(R0, Z0, zeta_init, zeta_target, field_line_rhs):
     
     return sol
 
+#TODO: Clean up this functionality? Recombine with getCoordinate.
 def getCoordSpline(R, Z):
     # Get arrays of indices
     nx = np.shape(R)[0]
@@ -116,28 +117,8 @@ def getCoordSpline(R, Z):
     tree = KDTree(position)
         
     # Repeat the data in z, to approximate periodicity
-    R_ext = R #np.concatenate((R, R, R), axis=1) #R
-    Z_ext = Z #np.concatenate((Z, Z, Z), axis=1) #Z
-
-    _spl_r = interpolate.RectBivariateSpline(xinds, zinds, R_ext)
-    _spl_z = interpolate.RectBivariateSpline(xinds, zinds, Z_ext)
-
-    return _spl_r, _spl_z, tree
-
-def getCoordSplineOrig(R, Z):
-    # Get arrays of indices
-    nx = np.shape(R)[0]
-    nz = np.shape(Z)[1]
-    xinds = np.arange(nx)
-    zinds = np.arange(nz * 3)
-
-    n = R.size
-    position = np.concatenate((R.reshape((n, 1)), R.reshape((n, 1))), axis=1)
-    tree = KDTree(position)
-        
-    # Repeat the data in z, to approximate periodicity
-    R_ext = np.concatenate((R, R, R), axis=1)
-    Z_ext = np.concatenate((Z, Z, Z), axis=1)
+    R_ext = R
+    Z_ext = Z
 
     _spl_r = interpolate.RectBivariateSpline(xinds, zinds, R_ext)
     _spl_z = interpolate.RectBivariateSpline(xinds, zinds, Z_ext)
@@ -150,28 +131,11 @@ def getCoordinate(R, Z, spl_r, spl_z, xind, zind, dx=0, dz=0):
 
     if (np.amin(xind) < 0) or (np.amax(xind) > nx - 1):
         raise ValueError("x index out of range")
-    #TODO: zoidberg doesnt check z because it concats x3
     if (np.amin(zind) < 0) or (np.amax(zind) > nz - 1):
         raise ValueError("z index out of range")
 
     R = spl_r(xind, zind, dx=dx, dy=dz, grid=False)
     Z = spl_z(xind, zind, dx=dx, dy=dz, grid=False)
-
-    return R, Z
-
-def getCoordinateOrig(R, Z, spl_r, spl_z, xind, zind, dx=0, dz=0):
-    nx, nz = R.shape
-
-    if (np.amin(xind) < 0) or (np.amax(xind) > nx - 1):
-        raise ValueError("x index out of range")
-    #TODO: zoidberg doesnt check z because it concats x3?
-    #if (np.amin(zind) < 0) or (np.amax(zind) > nz - 1):
-    #    raise ValueError("z index out of range")
-
-    # Periodic in y (TODO: Z is not y?)
-    zind = np.remainder(zind, nz)
-    R = spl_r(xind, zind + nz, dx=dx, dy=dz, grid=False)
-    Z = spl_z(xind, zind + nz, dx=dx, dy=dz, grid=False)
 
     return R, Z
 
@@ -234,7 +198,7 @@ def get_metric(R, Z, nx, nz, nxpad, nzpad):
         #"J": JB,
     }
 
-def findIndexTok(R, Z, Rmin, Zmin, dR, dZ, rbdy, zbdy, show=True):
+def findIndex(R, Z, Rmin, Zmin, dR, dZ, rbdy, zbdy, show=False):
     """Finds the (x,z) index corresponding to the given (R,Z) coordinate
 
     Parameters
@@ -297,127 +261,6 @@ def findIndexTok(R, Z, Rmin, Zmin, dR, dZ, rbdy, zbdy, show=True):
         plt.show()
 
     return xind, zind
-
-def findIndex(Rctr, Zctr, R, Z, tol=1e-10, show=False):
-    """Finds the (x, z) index corresponding to the given (R, Z) coordinate
-
-    Parameters
-    ----------
-    R, Z : array_like
-        Locations. Can be scalar or array, must be the same shape
-    tol : float, optional
-        Maximum tolerance on the square distance
-
-    Returns
-    -------
-    x, z : (ndarray, ndarray)
-        Index as a float, same shape as R, Z
-
-    """
-    spl_r, spl_z, tree = getCoordSplineOrig(Rctr, Zctr)
-
-    # Make sure inputs are NumPy arrays
-    R = np.asarray(R)
-    Z = np.asarray(Z)
-
-    # Check that they have the same shape
-    assert R.shape == Z.shape
-
-    input_shape = R.shape  # So output has same shape as input
-
-    # Get distance and index into flattened data
-    # Note ind can be an integer, or an array of ints
-    # with the same number of elements as the input (R,Z) arrays
-    n = R.size
-    position = np.concatenate((R.reshape((n, 1)), Z.reshape((n, 1))), axis=1)
-
-    R = R.reshape((n,))
-    Z = Z.reshape((n,))
-    dists, ind = tree.query(position)
-
-    # Calculate (x,y) index
-    nx, nz = Rctr.shape
-    xind = np.floor_divide(ind, nz)
-    zind = ind - xind * nz
-
-    # Convert indices to float
-    xind = np.asarray(xind, dtype=float)
-    zind = np.asarray(zind, dtype=float)
-
-    # Create a mask for the positions
-    mask = np.ones(xind.shape)
-    mask[np.logical_or((xind < 0.5), (xind > (nx - 1.5)))] = (
-        0.0  # Set to zero if near the boundary
-    )
-
-    if show:
-        plt.plot(Rctr, Zctr, ".")
-        plt.plot(R, Z, "x")
-
-    cnt = 0
-    underrelax = 1
-
-    while True:
-        # Use Newton iteration to find the index
-        # dR, dZ are the distance away from the desired point
-        Rpos, Zpos = getCoordinateOrig(Rctr, Zctr, spl_r, spl_z, xind, zind)
-        if show:
-            plt.plot(Rpos, Zpos, "o")
-        dR = Rpos - R
-        dZ = Zpos - Z
-
-        # Check if close enough
-        # Note: only check the points which are not in the boundary
-        val = np.amax(mask * (dR**2 + dZ**2))
-        if val < tol:
-            break
-        cnt += 1
-        if cnt == 10:
-            underrelax = 1.5
-        if cnt == 100:
-            underrelax = 2
-        if cnt == 300:
-            underrelax = 2.5
-        if cnt == 700:
-            underrelax = 3
-        if cnt == 1000:
-            raise RuntimeError("Failed to converge")
-
-        # Calculate derivatives
-        dRdx, dZdx = getCoordinateOrig(Rctr, Zctr, spl_r, spl_z, xind, zind, dx=1)
-        dRdz, dZdz = getCoordinateOrig(Rctr, Zctr, spl_r, spl_z, xind, zind, dz=1)
-
-        # Invert 2x2 matrix to get change in coordinates
-        #
-        # (x) -=  ( dR/dx   dR/dz )^-1  (dR)
-        # (y)     ( dZ/dx   dZ/dz )     (dz)
-        #
-        #
-        # (x) -=  ( dZ/dz  -dR/dz ) (dR)
-        # (y)     (-dZ/dx   dR/dx ) (dZ) / (dR/dx*dZ/dy - dR/dy*dZ/dx)
-        determinant = dRdx * dZdz - dRdz * dZdx
-
-        xind -= mask * ((dZdz * dR - dRdz * dZ) / determinant / underrelax)
-        zind -= mask * ((dRdx * dZ - dZdx * dR) / determinant / underrelax)
-
-        # Re-check for boundary
-        in_boundary = xind < 0.5
-        mask[in_boundary] = 0.0  # Set to zero if near the boundary
-        xind[in_boundary] = 0.0
-        out_boundary = xind > (nx - 1.5)
-        mask[out_boundary] = 0.0  # Set to zero if near the boundary
-        xind[out_boundary] = nx - 1
-
-    if show:
-        plt.show()
-
-    # Set xind to -1 if in the inner boundary, nx if in outer boundary
-    in_boundary = xind < 0.5
-    xind[in_boundary] = -1
-    out_boundary = xind > (nx - 1.5)
-    xind[out_boundary] = nx
-
-    return xind.reshape(input_shape), zind.reshape(input_shape)
 
 def plot(R, Z, psi, ghost, rbdy, zbdy, rlmt, zlmt, sign_b0,
         Rvals_pos, Zvals_pos, Rvals_neg, Zvals_neg, opoints, xpoints,
@@ -577,11 +420,6 @@ def main(args):
     #R1, Z1 = rbdy[sep_idx], zbdy[sep_idx]         #Separatrix
     R1, Z1 = rbdy[sep_idx] + offset, zbdy[sep_idx] #Minor offset from separatrix.
     #R1, Z1 = np.min(R), Z[nz//2]
-    #Create toroidal angle array in radians.
-    #q1 = q_spl(psi_func(R1,Z1)[0,0]) #Getting single point so access output as [0,0].
-    #zeta_arr = np.linspace(0, np.pi, num_zeta + 1)*q1 #q extends to all poloidal angles.
-    #if (R1 == rbdy[sep_idx]): #Need more points at separatrix. Maybe pass angular resolution and do a while loop for points instead.
-    #    zeta_arr *= 1.5
     #Grab wall points to test points in domain.
     wall_pts = np.column_stack([rlmt,zlmt])
     wall_path = path.Path(wall_pts, closed=True)
@@ -591,7 +429,6 @@ def main(args):
     opoints, xpoints = fc(R2D, Z2D, psi, sep_atol, sep_maxits)
     #Remove points outside the wall. Not enough to remove all non-important points it turns out.
     #TODO: Can try removing points within certain flux surface outside of LCFS?
-    #TODO: Should index be closest index to separatrix? Or lower value.
     for points in opoints[:]:
         if not wall_path.contains_point((points[0], points[1])):
             opoints.remove(points)
@@ -654,10 +491,8 @@ def main(args):
     }
     #Need to do this all in 3D now, didn't need the complication before.
     R3, phi3, Z3 = np.meshgrid(R, phi_val, Z, indexing='ij')
-    fwd_xtp, fwd_ztp = findIndexTok(Rfwd, Zfwd, R[0], Z[0], R[1]-R[0], Z[1]-Z[0], rbdy, zbdy)
-    bwd_xtp, bwd_ztp = findIndexTok(Rbwd, Zbwd, R[0], Z[0], R[1]-R[0], Z[1]-Z[0], rbdy, zbdy)
-    #fwd_xtp, fwd_ztp = findIndex(RR, ZZ, Rfwd, Zfwd) #, show=True)
-    #bwd_xtp, bwd_ztp = findIndex(RR, ZZ, Rbwd, Zbwd) #, show=True)
+    fwd_xtp, fwd_ztp = findIndex(Rfwd, Zfwd, R[0], Z[0], R[1]-R[0], Z[1]-Z[0], rbdy, zbdy)
+    bwd_xtp, bwd_ztp = findIndex(Rbwd, Zbwd, R[0], Z[0], R[1]-R[0], Z[1]-Z[0], rbdy, zbdy)
 
     maps = {
         "R": R3,
