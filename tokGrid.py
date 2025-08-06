@@ -5,6 +5,7 @@ import uuid
 
 from matplotlib import path as path
 from matplotlib import pyplot as plt
+from matplotlib.patches import PathPatch
 from matplotlib.patches import Rectangle
 from scipy import integrate,interpolate
 from scipy.spatial import cKDTree as KDTree
@@ -103,33 +104,74 @@ def trace_field_line(R0, Z0, zeta_init, zeta_target, field_line_rhs):
     
     return sol
 
-def getCoordinate(R, Z, xind, zind, dx=0, dz=0):
+def getCoordSpline(R, Z):
     # Get arrays of indices
     nx = np.shape(R)[0]
     nz = np.shape(Z)[1]
     xinds = np.arange(nx)
     zinds = np.arange(nz) # * 3)
+
+    n = R.size
+    position = np.concatenate((R.reshape((n, 1)), R.reshape((n, 1))), axis=1)
+    tree = KDTree(position)
         
     # Repeat the data in z, to approximate periodicity
-    R_ext = R #np.concatenate((R, R, R), axis=1)
-    Z_ext = Z #np.concatenate((Z, Z, Z), axis=1)
+    R_ext = R #np.concatenate((R, R, R), axis=1) #R
+    Z_ext = Z #np.concatenate((Z, Z, Z), axis=1) #Z
 
     _spl_r = interpolate.RectBivariateSpline(xinds, zinds, R_ext)
     _spl_z = interpolate.RectBivariateSpline(xinds, zinds, Z_ext)
 
+    return _spl_r, _spl_z, tree
+
+def getCoordSplineOrig(R, Z):
+    # Get arrays of indices
+    nx = np.shape(R)[0]
+    nz = np.shape(Z)[1]
+    xinds = np.arange(nx)
+    zinds = np.arange(nz * 3)
+
+    n = R.size
+    position = np.concatenate((R.reshape((n, 1)), R.reshape((n, 1))), axis=1)
+    tree = KDTree(position)
+        
+    # Repeat the data in z, to approximate periodicity
+    R_ext = np.concatenate((R, R, R), axis=1)
+    Z_ext = np.concatenate((Z, Z, Z), axis=1)
+
+    _spl_r = interpolate.RectBivariateSpline(xinds, zinds, R_ext)
+    _spl_z = interpolate.RectBivariateSpline(xinds, zinds, Z_ext)
+
+    return _spl_r, _spl_z, tree
+
+
+def getCoordinate(R, Z, spl_r, spl_z, xind, zind, dx=0, dz=0):
     nx, nz = R.shape
+
     if (np.amin(xind) < 0) or (np.amax(xind) > nx - 1):
         raise ValueError("x index out of range")
+    #TODO: zoidberg doesnt check z because it concats x3
     if (np.amin(zind) < 0) or (np.amax(zind) > nz - 1):
         raise ValueError("z index out of range")
 
-    # Periodic in y (TODO: Z is not y!)
-    zind = np.remainder(zind, nz)
-    #R = _spl_r(xind, zind + nz, dx=dx, dy=dz, grid=False)
-    #Z = _spl_z(xind, zind + nz, dx=dx, dy=dz, grid=False)
+    R = spl_r(xind, zind, dx=dx, dy=dz, grid=False)
+    Z = spl_z(xind, zind, dx=dx, dy=dz, grid=False)
 
-    R = _spl_r(xind, zind, dx=dx, dy=dz, grid=False)
-    Z = _spl_z(xind, zind, dx=dx, dy=dz, grid=False)
+    return R, Z
+
+def getCoordinateOrig(R, Z, spl_r, spl_z, xind, zind, dx=0, dz=0):
+    nx, nz = R.shape
+
+    if (np.amin(xind) < 0) or (np.amax(xind) > nx - 1):
+        raise ValueError("x index out of range")
+    #TODO: zoidberg doesnt check z because it concats x3?
+    #if (np.amin(zind) < 0) or (np.amax(zind) > nz - 1):
+    #    raise ValueError("z index out of range")
+
+    # Periodic in y (TODO: Z is not y?)
+    zind = np.remainder(zind, nz)
+    R = spl_r(xind, zind + nz, dx=dx, dy=dz, grid=False)
+    Z = spl_z(xind, zind + nz, dx=dx, dy=dz, grid=False)
 
     return R, Z
 
@@ -137,9 +179,11 @@ def get_metric(R, Z, nx, nz, nxpad, nzpad):
     #Get arrays of indices.
     xind, zind = np.meshgrid(np.arange(nx), np.arange(nz), indexing="ij")
 
+    spl_r, spl_z, tree = getCoordSpline(R, Z)
+
     #Calculate the gradient along each coordinate.
     dolddnew = np.array(
-        [getCoordinate(R, Z, xind, zind, dx=a, dz=b) for a, b in ((1, 0), (0, 1))]
+        [getCoordinate(R, Z, spl_r, spl_z, xind, zind, dx=a, dz=b) for a, b in ((1, 0), (0, 1))]
     )
     #Dims: 0 : dx or dz?
     #      1 : R or z?
@@ -190,7 +234,71 @@ def get_metric(R, Z, nx, nz, nxpad, nzpad):
         #"J": JB,
     }
 
-def findIndex(R, Z, tol=1e-10, show=False):
+def findIndexTok(R, Z, Rmin, Zmin, dR, dZ, rbdy, zbdy, show=True):
+    """Finds the (x,z) index corresponding to the given (R,Z) coordinate
+
+    Parameters
+    ----------
+    R, Z : array_like
+        Locations to find indices for
+
+    Returns
+    -------
+    x, z : (ndarray, ndarray)
+        Index as a float, same shape as R,Z
+
+    """
+    
+    # Make sure inputs are NumPy arrays
+    R = np.asarray(R)
+    Z = np.asarray(Z)
+
+    # Check that they have the same shape
+    assert R.shape == Z.shape
+
+    xind = (R - Rmin) / dR
+    zind = (Z - Zmin) / dZ
+
+    # Note: These indices may be outside the domain,
+    # but this is handled in BOUT++, and useful for periodic
+    # domains.
+
+    #Mask out points around separatrix.
+    sep_pts = np.column_stack([rbdy,zbdy])
+    sep_path = path.Path(sep_pts, closed=True)
+    pts = np.column_stack([R.ravel(), Z.ravel()])
+    inside = sep_path.contains_points(pts)
+    inside = inside.reshape((R.shape[0], R.shape[1]))
+
+    xind[~inside] = -1
+    zind[~inside] = -1
+
+    if (show):
+        fig, ax = plt.subplots(figsize=(6,6))
+
+        # 1) draw the wall Path itself
+        patch = PathPatch(sep_path, facecolor='none', edgecolor='k', lw=2)
+        ax.add_patch(patch)
+
+        # 2) scatter the points inside (green) and outside (red)
+        ax.scatter(
+            R[ inside], Z[ inside],
+            s=10, c='g', marker='o', label='inside', alpha=0.6
+        )
+        ax.scatter(
+            R[~inside], Z[~inside],
+            s=10, c='r', marker='x', label='outside', alpha=0.6
+        )
+
+        ax.set_aspect('equal', 'box')
+        ax.set_xlabel('x')
+        ax.set_ylabel('z')
+        ax.legend(loc='upper right')
+        plt.show()
+
+    return xind, zind
+
+def findIndex(Rctr, Zctr, R, Z, tol=1e-10, show=False):
     """Finds the (x, z) index corresponding to the given (R, Z) coordinate
 
     Parameters
@@ -206,10 +314,9 @@ def findIndex(R, Z, tol=1e-10, show=False):
         Index as a float, same shape as R, Z
 
     """
+    spl_r, spl_z, tree = getCoordSplineOrig(Rctr, Zctr)
 
     # Make sure inputs are NumPy arrays
-    origR = R
-    origZ = Z
     R = np.asarray(R)
     Z = np.asarray(Z)
 
@@ -226,11 +333,10 @@ def findIndex(R, Z, tol=1e-10, show=False):
 
     R = R.reshape((n,))
     Z = Z.reshape((n,))
-    tree = KDTree(position)
     dists, ind = tree.query(position)
 
     # Calculate (x,y) index
-    nx, nz = origR.shape
+    nx, nz = Rctr.shape
     xind = np.floor_divide(ind, nz)
     zind = ind - xind * nz
 
@@ -245,7 +351,7 @@ def findIndex(R, Z, tol=1e-10, show=False):
     )
 
     if show:
-        plt.plot(origR, origZ, ".")
+        plt.plot(Rctr, Zctr, ".")
         plt.plot(R, Z, "x")
 
     cnt = 0
@@ -254,7 +360,7 @@ def findIndex(R, Z, tol=1e-10, show=False):
     while True:
         # Use Newton iteration to find the index
         # dR, dZ are the distance away from the desired point
-        Rpos, Zpos = getCoordinate(origR, origZ, xind, zind)
+        Rpos, Zpos = getCoordinateOrig(Rctr, Zctr, spl_r, spl_z, xind, zind)
         if show:
             plt.plot(Rpos, Zpos, "o")
         dR = Rpos - R
@@ -278,8 +384,8 @@ def findIndex(R, Z, tol=1e-10, show=False):
             raise RuntimeError("Failed to converge")
 
         # Calculate derivatives
-        dRdx, dZdx = getCoordinate(origR, origZ, xind, zind, dx=1)
-        dRdz, dZdz = getCoordinate(origR, origZ, xind, zind, dz=1)
+        dRdx, dZdx = getCoordinateOrig(Rctr, Zctr, spl_r, spl_z, xind, zind, dx=1)
+        dRdz, dZdz = getCoordinateOrig(Rctr, Zctr, spl_r, spl_z, xind, zind, dz=1)
 
         # Invert 2x2 matrix to get change in coordinates
         #
@@ -493,11 +599,12 @@ def main(args):
         if not wall_path.contains_point((points[0], points[1])):
             xpoints.remove(points)
 
-    ixseps1 = ixseps2 = nrp #Default to all points contained in closed flux region.
-    if len(xpoints) >= 1:
-        ixseps1 = np.argmin(np.abs(R - xpoints[0][0]))
-    if len(xpoints) >= 2:
-        ixseps2 = np.argmin(np.abs(R - xpoints[1][0]))
+    #For BSTING just set to nx + 1. Used for mpi communication for FCI, so don't separate anything.
+    ixseps1 = ixseps2 = nrp + 1
+    #if len(xpoints) >= 1:
+    #    ixseps1 = np.argmin(np.abs(R - xpoints[0][0]))
+    #if len(xpoints) >= 2:
+    #    ixseps2 = np.argmin(np.abs(R - xpoints[1][0]))
 
     #Trace field lines in both directions.
     print("Tracing field line in forward direction...")
@@ -547,8 +654,10 @@ def main(args):
     }
     #Need to do this all in 3D now, didn't need the complication before.
     R3, phi3, Z3 = np.meshgrid(R, phi_val, Z, indexing='ij')
-    fwd_xtp, fwd_ztp = findIndex(Rfwd, Zfwd) #, show=True)
-    bwd_xtp, bwd_ztp = findIndex(Rbwd, Zbwd) #, show=True)
+    fwd_xtp, fwd_ztp = findIndexTok(Rfwd, Zfwd, R[0], Z[0], R[1]-R[0], Z[1]-Z[0], rbdy, zbdy)
+    bwd_xtp, bwd_ztp = findIndexTok(Rbwd, Zbwd, R[0], Z[0], R[1]-R[0], Z[1]-Z[0], rbdy, zbdy)
+    #fwd_xtp, fwd_ztp = findIndex(RR, ZZ, Rfwd, Zfwd) #, show=True)
+    #bwd_xtp, bwd_ztp = findIndex(RR, ZZ, Rbwd, Zbwd) #, show=True)
 
     maps = {
         "R": R3,
