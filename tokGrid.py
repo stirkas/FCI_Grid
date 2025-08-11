@@ -486,8 +486,9 @@ def main(args):
     #Generate metric and maps and so on to write out for BSTING.
     print("Generating metric and map data for output file...")
     #TODO: Generate interpolation weights per zoidberg? Can run BSTING without it first and add later.
+    psi2 = psi_func(R,Z)
     attributes = {
-        "psi": psi[:, np.newaxis, :]
+        "psi": psi2[:, np.newaxis, :]
     }
     #Need to do this all in 3D now, didn't need the complication before.
     R3, phi3, Z3 = np.meshgrid(R, phi_val, Z, indexing='ij')
@@ -503,10 +504,15 @@ def main(args):
         "forward_Z": Zfwd[:,np.newaxis,:],
         "backward_R": Rbwd[:,np.newaxis,:],
         "backward_Z": Zbwd[:,np.newaxis,:],
-        "forward_xt_prime": fwd_xtp,
-        "forward_zt_prime": fwd_ztp,
-        "backward_xt_prime": bwd_xtp,
-        "backward_zt_prime": bwd_ztp
+        "forward_xt_prime": fwd_xtp[:,np.newaxis,:],
+        "forward_zt_prime": fwd_ztp[:,np.newaxis,:],
+        "backward_xt_prime": bwd_xtp[:,np.newaxis,:],
+        "backward_zt_prime": bwd_ztp[:,np.newaxis,:],
+        "dagp_fv_XX": np.ones_like(R3),
+        "dagp_fv_XZ": np.ones_like(R3),
+        "dagp_fv_volume": np.ones_like(R3),
+        "dagp_fv_ZX": np.ones_like(R3),
+        "dagp_fv_ZZ": np.ones_like(R3)
     }
 
     #Store metric info. Note tokamak example in zoidberg removes Z dim for some reason (2D)...
@@ -518,7 +524,7 @@ def main(args):
     bwd_metric = get_metric(Rbwd, Zbwd, nrp, nzp, rpad, zpad)
     metric = {
         "Rxy": R3,
-        "Bxy": Bmag,
+        "Bxy": Bmag[:,np.newaxis,:],
         "dx": ctr_metric["dx"][:,np.newaxis,:],
         "dy": np.full_like(R3, dphi),
         "dz": ctr_metric["dz"][:,np.newaxis,:],
@@ -564,9 +570,9 @@ def main(args):
         f.write_file_attribute("id", grid_id)      #Conventional name
         f.write_file_attribute("grid_id", grid_id) #BOUT++ specific name
 
-        f.write("nx", nr)
+        f.write("nx", nrp)
         f.write("ny", nphi)
-        f.write("nz", nz)
+        f.write("nz", nzp)
 
         f.write("dx", metric["dx"])
         f.write("dy", metric["dy"])
