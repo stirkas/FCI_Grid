@@ -16,6 +16,44 @@ from hypnotoad import __version__
 from hypnotoad.geqdsk._geqdsk import read as gq_read
 from hypnotoad.utils.critical import find_critical as fc
 
+import stencil_dagp_fv
+import poloidal_grid2
+
+def make_3d(arr_2d: np.ndarray, ny: int) -> np.ndarray:
+    """
+    Repeat a 2D array (R, Z) along the middle axis to shape (R, ny, Z).
+    If writable=False, returns a broadcasted (read-only) view.
+    """
+
+    return np.repeat(arr_2d[:, np.newaxis, :], ny, axis=1)
+
+def edges_from_centers(c):
+    """Face edges from center coords via linear extrapolation at both ends."""
+    c = np.asarray(c, dtype=float)
+    if c.size < 2:
+        raise ValueError("Need at least 2 centers to form edges.")
+    e = np.empty(c.size + 1, dtype=float)
+    e[1:-1] = 0.5 * (c[:-1] + c[1:])
+    e[0]    = c[0] - 0.5 * (c[1] - c[0])
+    e[-1]   = c[-1] + 0.5 * (c[-1] - c[-2])
+    return e
+
+def Ar_from_centers(R_centers, Z_centers):
+    """
+    Compute A_R = ∬ R dA for each rectangular cell, returned at cell centers.
+    R_centers, Z_centers: 1D arrays of cell-center coordinates (in meters).
+    Returns Ar with shape (len(R_centers), len(Z_centers)).
+    """
+    Re = edges_from_centers(R_centers)  # shape NR+1
+    Ze = edges_from_centers(Z_centers)  # shape NZ+1
+
+    Rm, Rp = Re[:-1], Re[1:]            # left/right faces per cell
+    Zm, Zp = Ze[:-1], Ze[1:]            # bottom/top faces per cell
+
+    # Ar[i,j] = 0.5*(R_{i+1/2,+}^2 - R_{i+1/2,-}^2) * (Z_{j+1/2,+} - Z_{j+1/2,-})
+    Ar = 0.5 * (Rp**2 - Rm**2)[:, None] * (Zp - Zm)[None, :]
+    return Ar
+
 def setup_field_line_interpolation(R_grid, Z_grid, dRdphi, dZdphi, linear=0):
     """
     Set up interpolators for field line derivatives
@@ -105,23 +143,20 @@ def trace_field_line(R0, Z0, zeta_init, zeta_target, field_line_rhs):
     return sol
 
 #TODO: Clean up this functionality? Recombine with getCoordinate.
+#Note column stack for tree, so nr != nz is ok. Need to make sure this is fine in zoidberg to update and remove asserts.
+#Also remove temp files and access classes in zoidberg directly (and transfer bug fixes therein?)
+#Also have meshgrids multiple places now.
 def getCoordSpline(R, Z):
     # Get arrays of indices
-    nx = np.shape(R)[0]
-    nz = np.shape(Z)[1]
+    nx, nz = R.shape
     xinds = np.arange(nx)
-    zinds = np.arange(nz) # * 3)
+    zinds = np.arange(nz)
 
-    n = R.size
-    position = np.concatenate((R.reshape((n, 1)), R.reshape((n, 1))), axis=1)
+    position = np.column_stack((R.ravel(),Z.ravel()))
     tree = KDTree(position)
-        
-    # Repeat the data in z, to approximate periodicity
-    R_ext = R
-    Z_ext = Z
 
-    _spl_r = interpolate.RectBivariateSpline(xinds, zinds, R_ext)
-    _spl_z = interpolate.RectBivariateSpline(xinds, zinds, Z_ext)
+    _spl_r = interpolate.RectBivariateSpline(xinds, zinds, R)
+    _spl_z = interpolate.RectBivariateSpline(xinds, zinds, Z)
 
     return _spl_r, _spl_z, tree
 
@@ -139,6 +174,44 @@ def getCoordinate(R, Z, spl_r, spl_z, xind, zind, dx=0, dz=0):
 
     return R, Z
 
+def getCoordSplineOrig(R, Z):
+    assert R.shape == Z.shape
+
+    # Get arrays of indices
+    nx, nz = R.shape
+    xinds = np.arange(nx)
+    zinds = np.arange(nz)
+    
+    # Create a KDTree for quick lookup of nearest points
+    n = R.size
+    data = np.concatenate((R.reshape((n, 1)), Z.reshape((n, 1))), axis=1)
+    tree = KDTree(data)
+
+    xinds = np.arange(nx)
+    zinds = np.arange(nz * 3)
+    # Repeat the data in z, to approximate periodicity
+    R_ext = np.concatenate((R, R, R), axis=1)
+    Z_ext = np.concatenate((Z, Z, Z), axis=1)
+
+    _spl_r = interpolate.RectBivariateSpline(xinds, zinds, R_ext)
+    _spl_z = interpolate.RectBivariateSpline(xinds, zinds, Z_ext)
+
+    return _spl_r, _spl_z, tree
+
+def getCoordinateOrig(R, Z, spl_r, spl_z, xind, zind, dx=0, dz=0):
+    nx, nz = R.shape
+    if (np.amin(xind) < 0) or (np.amax(xind) > nx - 1):
+        raise ValueError("x index out of range")
+    
+    # Periodic in y (z!)
+    zind = np.remainder(zind, nz)
+
+    R = spl_r(xind, zind + nz, dx=dx, dy=dz, grid=False)
+    Z = spl_z(xind, zind + nz, dx=dx, dy=dz, grid=False)
+
+    return R, Z
+
+#NOTE: Taken from zoidberg StructuredPoloidalGrid.
 def get_metric(R, Z, nx, nz, nxpad, nzpad):
     #Get arrays of indices.
     xind, zind = np.meshgrid(np.arange(nx), np.arange(nz), indexing="ij")
@@ -234,8 +307,9 @@ def findIndex(R, Z, Rmin, Zmin, dR, dZ, rbdy, zbdy, show=False):
     inside = sep_path.contains_points(pts)
     inside = inside.reshape((R.shape[0], R.shape[1]))
 
-    xind[~inside] = -1
-    zind[~inside] = -1
+    nrp = len(R)
+    xind[~inside] = nrp
+    #zind[~inside] = -1 #Only need to do x?
 
     if (show):
         fig, ax = plt.subplots(figsize=(6,6))
@@ -302,23 +376,6 @@ def plot(R, Z, psi, ghost, rbdy, zbdy, rlmt, zlmt, sign_b0,
     ax.grid(True)
     plt.tight_layout()
     plt.show()
-    #fig.savefig('flux_surf.png', dpi=600)
-    #fig.savefig('flux_surf.pdf')
-
-    ##Can look for high threshold gradient regions (>95% of array) to see where splines may be problematic
-    ##and linear interp might be better.
-    #dpsi_dR, dpsi_dZ = np.gradient(psi, R, Z, edge_order=2)
-    #grad_mag = Bp #np.sqrt(dpsi_dR**2 + dpsi_dZ**2) #Bp
-    #thresh = 95
-    #sharp_mask = grad_mag >= np.percentile(grad_mag, thresh)
-    #RR, ZZ = np.meshgrid(R, Z, indexing='ij')
-    #fig, ax = plt.subplots(figsize=(6,8))
-    #cf = ax.contourf(RR, ZZ, grad_mag, levels=50, cmap='viridis')
-    #ax.contour(RR, ZZ, sharp_mask, levels=[0.5], colors='white', linewidths=2)
-    #plt.colorbar(cf, ax=ax, label='|∇ψ|')
-    #ax.set_xlabel('R'); ax.set_ylabel('Z')
-    #plt.title(f"Regions with |∇ψ| ≥ {thresh:.3g}%")
-    #plt.show()
 
 def main(args):
     #Read eqdsk file.
@@ -375,19 +432,43 @@ def main(args):
     p_spl = interpolate.InterpolatedUnivariateSpline(psi1D, prsr, ext=3)
 
     #Generate simulation grid (lower res + guard cells)
+    #TODO: Can pad in z as well in full FCI case, but wont matter if gfile large outside mask.
     rpad, phipad, zpad = 2,1,0 #0 #Padding/ghost cells in R. No padding in Z, and 1 in Y according to zoidberg, why?
-    grid_res = 64
-    dphi = 2*np.pi/16
+    grid_res, phi_res = 64, 16
     nr, nphi, nz = grid_res, 1, grid_res
-    nrp, nzp = nr + 2*rpad, nz + 2*zpad
-    phi_val = 0 #Take phi=0 to be reference point.
-    R, Z = np.linspace(rmin, rmax, nr), np.linspace(zmin, zmax, nz)
-    dR, dZ = R[1]-R[0], Z[1]-Z[0]
-    rp_min, rp_max = rmin - rpad*dR, rmax + rpad*dR
-    zp_min, zp_max = zmin - zpad*dZ, zmax + zpad*dZ
-    ghosts_lo_R, ghosts_hi_R = R[0] - dR*np.arange(rpad, 0, -1), R[-1] + dR*np.arange(1, rpad + 1)
-    ghosts_lo_Z, ghosts_hi_Z = Z[0] - dZ*np.arange(zpad, 0, -1), Z[-1] + dZ*np.arange(1, zpad + 1)
-    #Replace R and Z with padded arrays.
+    phi_val = 0 #Take phi=0 to be starting point.
+    dphi = 2*np.pi/phi_res
+    phi_arr = [dphi]
+    copy3d = False
+    if copy3d == True:
+        phi_arr = np.linspace(phi_val, 2*np.pi, nphi, endpoint=False) #Periodic so dont go all the way.
+        dphi = phi_arr[1]-phi_arr[0]
+        nphi = phi_res
+    #nrp, nzp = nr + 2*rpad, nz + 2*zpad
+    ##Method 1: Concatenate ghost points onto initial grid so 64x64 goes to 68x64.
+    ##dR, dZ = R[1]-R[0], Z[1]-Z[0]
+    ##rp_min, rp_max = rmin - rpad*dR, rmax + rpad*dR
+    ##zp_min, zp_max = zmin - zpad*dZ, zmax + zpad*dZ
+    ##ghosts_lo_R, ghosts_hi_R = R[0] - dR*np.arange(rpad, 0, -1), R[-1] + dR*np.arange(1, rpad + 1)
+    ##ghosts_lo_Z, ghosts_hi_Z = Z[0] - dZ*np.arange(zpad, 0, -1), Z[-1] + dZ*np.arange(1, zpad + 1)
+    ###Replace R and Z with padded arrays.
+    ##R = np.concatenate((ghosts_lo_R, R, ghosts_hi_R))
+    ##Z = np.concatenate((ghosts_lo_Z, Z, ghosts_hi_Z))
+    # --- 1) Strip ghosts -> 60 x 64 ---
+    #R_int = R[rpad:-rpad]                         # length 60
+    #Z_int = Z if zpad == 0 else Z[zpad:-zpad]     # still 64 here
+    #psi_int = psi[rpad:-rpad, :] if zpad == 0 else psi[rpad:-rpad, zpad:-zpad]
+    # psi_int.shape == (60, 64)
+
+    #Method 2: Replace original points with ghost points so grid 64x64 for Structured class which requires nx == nz for now.
+    nrp, nzp = nr, nz
+    R, Z = np.linspace(rmin, rmax, nr - 2*rpad), np.linspace(zmin, zmax, nz - 2*zpad)
+    dR = R[1] - R[0]
+    ghosts_lo_R = R[0]  - dR * np.arange(rpad, 0, -1)
+    ghosts_hi_R = R[-1] + dR * np.arange(1, rpad+1)
+    dZ = Z[1] - Z[0]
+    ghosts_lo_Z = Z[0]  - dZ * np.arange(zpad, 0, -1)
+    ghosts_hi_Z = Z[-1] + dZ * np.arange(1, zpad+1)
     R = np.concatenate((ghosts_lo_R, R, ghosts_hi_R))
     Z = np.concatenate((ghosts_lo_Z, Z, ghosts_hi_Z))
     RR, ZZ = np.meshgrid(R,Z,indexing='ij')
@@ -414,12 +495,12 @@ def main(args):
     #Choose a starting point for tracing single field line.
     offset = 0.005
     sep_idx = np.argmax(rbdy)
+    R1, Z1 = rbdy[sep_idx] + offset, zbdy[sep_idx] #Minor offset from separatrix.
     #R1, Z1 = R0, Z0               #Magnetic axis
     #R1, Z1 = R[3*nr//4], Z[nz//2] #Core point.
     #R1, Z1 = R[7*nr//8], Z[nz//2] #Outer point.
-    #R1, Z1 = rbdy[sep_idx], zbdy[sep_idx]         #Separatrix
-    R1, Z1 = rbdy[sep_idx] + offset, zbdy[sep_idx] #Minor offset from separatrix.
-    #R1, Z1 = np.min(R), Z[nz//2]
+    #R1, Z1 = rbdy[sep_idx], zbdy[sep_idx] #Separatrix
+
     #Grab wall points to test points in domain.
     wall_pts = np.column_stack([rlmt,zlmt])
     wall_path = path.Path(wall_pts, closed=True)
@@ -429,6 +510,7 @@ def main(args):
     opoints, xpoints = fc(R2D, Z2D, psi, sep_atol, sep_maxits)
     #Remove points outside the wall. Not enough to remove all non-important points it turns out.
     #TODO: Can try removing points within certain flux surface outside of LCFS?
+    # |--->  Probably use psi spline from R,Z to drop points a bit outside LCFS.
     for points in opoints[:]:
         if not wall_path.contains_point((points[0], points[1])):
             opoints.remove(points)
@@ -454,6 +536,7 @@ def main(args):
 
     #Trace all grid points once back and forth.
     #Use low-res toroidal distance.
+    #TODO: Need to apply a mask for BSTING? Ben says to use the wall surface rather than the separatrix.
     gridPts = np.column_stack((RR.ravel(), ZZ.ravel()))
     fwdPts = np.zeros_like(gridPts)
     bwdPts = np.zeros_like(gridPts)
@@ -486,12 +569,12 @@ def main(args):
     #Generate metric and maps and so on to write out for BSTING.
     print("Generating metric and map data for output file...")
     #TODO: Generate interpolation weights per zoidberg? Can run BSTING without it first and add later.
-    psi2 = psi_func(R,Z)
+    psi = psi_func(R,Z)
     attributes = {
-        "psi": psi2[:, np.newaxis, :]
+        "psi": make_3d(psi, nphi)
     }
     #Need to do this all in 3D now, didn't need the complication before.
-    R3, phi3, Z3 = np.meshgrid(R, phi_val, Z, indexing='ij')
+    R3, phi3, Z3 = np.meshgrid(R, phi_arr, Z, indexing='ij')
     fwd_xtp, fwd_ztp = findIndex(Rfwd, Zfwd, R[0], Z[0], R[1]-R[0], Z[1]-Z[0], rbdy, zbdy)
     bwd_xtp, bwd_ztp = findIndex(Rbwd, Zbwd, R[0], Z[0], R[1]-R[0], Z[1]-Z[0], rbdy, zbdy)
 
@@ -500,72 +583,98 @@ def main(args):
         "Z": Z3,
         "MXG": rpad,
         "MYG": phipad,
-        "forward_R": Rfwd[:,np.newaxis,:],
-        "forward_Z": Zfwd[:,np.newaxis,:],
-        "backward_R": Rbwd[:,np.newaxis,:],
-        "backward_Z": Zbwd[:,np.newaxis,:],
-        "forward_xt_prime": fwd_xtp[:,np.newaxis,:],
-        "forward_zt_prime": fwd_ztp[:,np.newaxis,:],
-        "backward_xt_prime": bwd_xtp[:,np.newaxis,:],
-        "backward_zt_prime": bwd_ztp[:,np.newaxis,:],
-        "dagp_fv_XX": np.ones_like(R3),
-        "dagp_fv_XZ": np.ones_like(R3),
-        "dagp_fv_volume": np.ones_like(R3),
-        "dagp_fv_ZX": np.ones_like(R3),
-        "dagp_fv_ZZ": np.ones_like(R3)
+        "forward_R": make_3d(Rfwd, nphi),
+        "forward_Z": make_3d(Zfwd, nphi),
+        "backward_R": make_3d(Rbwd, nphi),
+        "backward_Z": make_3d(Zbwd, nphi),
+        "forward_xt_prime":  make_3d(fwd_xtp, nphi),
+        "forward_zt_prime":  make_3d(fwd_ztp, nphi),
+        "backward_xt_prime": make_3d(bwd_xtp, nphi),
+        "backward_zt_prime": make_3d(bwd_ztp, nphi)
     }
 
-    #Store metric info. Note tokamak example in zoidberg removes Z dim for some reason (2D)...
-    #Note gyy/g^yy not normalized as gxx and gzz are. Normalize all planes here for x and z coeffs.
-    #Note: No gxy, gzy pieces, because orthogonal, but x and z cells curved so gxz matters?
-    #TODO: Does Bphi/B factor in gyy matter??? Not according to BSTING paper. Do I need J on here?
+    #Store metric info. #TODO: Tokamak metric 3D for now, can update zoidberg to 2D, removing phi?
+    #And work in 3D for stellarator/mirror cases.
     ctr_metric = get_metric(R3[:,0,:], Z3[:,0,:], nrp, nzp, rpad, zpad)
     fwd_metric = get_metric(Rfwd, Zfwd, nrp, nzp, rpad, zpad)
     bwd_metric = get_metric(Rbwd, Zbwd, nrp, nzp, rpad, zpad)
+    Bmag3D = make_3d(Bmag, nphi)
+    Bphi3D = make_3d(Bphi, nphi)
+    parFac = Bmag3D/Bphi3D
     metric = {
-        "Rxy": R3,
-        "Bxy": Bmag[:,np.newaxis,:],
-        "dx": ctr_metric["dx"][:,np.newaxis,:],
-        "dy": np.full_like(R3, dphi),
-        "dz": ctr_metric["dz"][:,np.newaxis,:],
-        "g11": ctr_metric["gxx"][:,np.newaxis,:],
-        "g_11": ctr_metric["gxx"][:,np.newaxis,:],
-        "g13": ctr_metric["gxz"][:,np.newaxis,:],
-        "g_13": ctr_metric["g_xz"][:,np.newaxis,:],
-        "g22": 1/(R3**2),
+        "Rxy":  R3,
+        "Bxy":  Bmag3D,
+        "dx":   make_3d(ctr_metric["dx"], nphi),
+        "dy":   np.full_like(R3, dphi),
+        "dz":   make_3d(ctr_metric["dz"], nphi),
+        "g11":  make_3d(ctr_metric["gxx"], nphi),
+        "g_11": make_3d(ctr_metric["gxx"], nphi),
+        "g13":  make_3d(ctr_metric["gxz"], nphi),
+        "g_13": make_3d(ctr_metric["g_xz"], nphi),
+        "g22":  1/R3**2,
         "g_22": R3**2,
-        "g33": ctr_metric["gzz"][:,np.newaxis,:],
-        "g_33": ctr_metric["g_zz"][:,np.newaxis,:],
-        "forward_dx": fwd_metric["dx"][:,np.newaxis,:],
-        "forward_dy": np.full_like(R3, dphi),
-        "forward_dz": fwd_metric["dz"][:,np.newaxis,:],
-        "forward_g11": fwd_metric["gxx"][:,np.newaxis,:],
-        "forward_g_11": fwd_metric["gxx"][:,np.newaxis,:],
-        "forward_g13": fwd_metric["gxz"][:,np.newaxis,:],
-        "forward_g_13": fwd_metric["g_xz"][:,np.newaxis,:],
-        "forward_g22": 1/(R3**2),
-        "forward_g_22": R3**2,
-        "forward_g33": fwd_metric["gzz"][:,np.newaxis,:],
-        "forward_g_33": fwd_metric["g_zz"][:,np.newaxis,:],
-        "backward_dx": bwd_metric["dx"][:,np.newaxis,:],
-        "backward_dy": np.full_like(R3, dphi),
-        "backward_dz": bwd_metric["dz"][:,np.newaxis,:],
-        "backward_g11": bwd_metric["gxx"][:,np.newaxis,:],
-        "backward_g_11": bwd_metric["gxx"][:,np.newaxis,:],
-        "backward_g13": bwd_metric["gxz"][:,np.newaxis,:],
-        "backward_g_13": bwd_metric["g_xz"][:,np.newaxis,:],
-        "backward_g22": 1/(R3**2),
+        "g33":  make_3d(ctr_metric["gzz"], nphi),
+        "g_33": make_3d(ctr_metric["g_zz"], nphi),
+        "forward_dx":    make_3d(fwd_metric["dx"], nphi),
+        "forward_dy":    np.full_like(R3, dphi),
+        "forward_dz":    make_3d(fwd_metric["dz"], nphi),
+        "forward_g11":   make_3d(fwd_metric["gxx"], nphi),
+        "forward_g_11":  make_3d(fwd_metric["gxx"], nphi),
+        "forward_g13":   make_3d(fwd_metric["gxz"], nphi),
+        "forward_g_13":  make_3d(fwd_metric["g_xz"], nphi),
+        "forward_g22":   1/R3**2,
+        "forward_g_22":  R3**2,
+        "forward_g33":   make_3d(fwd_metric["gzz"], nphi),
+        "forward_g_33":  make_3d(fwd_metric["g_zz"], nphi),
+        "backward_dx":   make_3d(bwd_metric["dx"], nphi),
+        "backward_dy":   np.full_like(R3, dphi),
+        "backward_dz":   make_3d(bwd_metric["dz"], nphi),
+        "backward_g11":  make_3d(bwd_metric["gxx"], nphi),
+        "backward_g_11": make_3d(bwd_metric["gxx"], nphi),
+        "backward_g13":  make_3d(bwd_metric["gxz"], nphi),
+        "backward_g_13": make_3d(bwd_metric["g_xz"], nphi),
+        "backward_g22":  1/R3**2,
         "backward_g_22": R3**2,
-        "backward_g33": bwd_metric["gzz"][:,np.newaxis,:],
-        "backward_g_33": bwd_metric["g_zz"][:,np.newaxis,:]
+        "backward_g33":  make_3d(bwd_metric["gzz"], nphi),
+        "backward_g_33": make_3d(bwd_metric["g_zz"], nphi)
     }
+    #Update gyy's with field line following factors for parallel operators, since this is handled along field lines.
+    metric.update({k: v/parFac**2 for k, v in metric.items() if k in ("g22", "forward_g22", "backward_g22")})
+    metric.update({k: v*parFac**2 for k, v in metric.items() if k in ("g_22", "forward_g_22", "backward_g_22")})
+
+    #Generate divergence operators as well.
+    #dagp_vars = stencil_dagp_fv.doit([poloidal_grid2.StructuredPoloidalGrid(RR,ZZ)],plot=True)
+    ##TODO: Using non-periodic z and nx != nz seems to cause nans in dagp vars.
+    ##Replace with best fit based on data for now.
+    #for val in dagp_vars["dagp_fv_XX"]:
+    #    val[0][0] = val[0][1]
+    #    val[0][-1] = val[0][-2]
+    #np.nan_to_num(dagp_vars["dagp_fv_XZ"], copy=False, nan=0.0)
+    ##Extend from length 1 to nphi.
+    #for key,val in dagp_vars.items():
+    #    dagp_vars[key] = np.repeat(val, nphi, axis=1)
+    #TODO: Make sure these values are correct/Get stencil code working for all cases?
+    dagp_fv_XX = np.full_like(R3, np.sqrt(metric["g11"])/(1/nrp))
+    dagp_fv_ZZ = np.full_like(R3, np.sqrt(metric["g33"])/(1/nzp))
+    dagp_fv_XZ = np.zeros_like(R3)
+    dagp_fv_ZX = np.zeros_like(R3)
+    dagp_fv_volume = make_3d(Ar_from_centers(R,Z), nphi)
+    dagp_vars = {
+        "dagp_fv_XX": dagp_fv_XX,
+        "dagp_fv_XZ": dagp_fv_XZ,
+        "dagp_fv_ZX": dagp_fv_ZX,
+        "dagp_fv_ZZ": dagp_fv_ZZ,
+        "dagp_fv_volume": dagp_fv_volume
+    }
+    maps.update(dagp_vars)
 
     #Write output to data file.
     gridfile = gfilename + ".fci.nc"
+    print("Writing to " + str(gridfile) + "...")
     with bdata.DataFile(gridfile, write=True, create=True, format="NETCDF4") as f:
         f.write_file_attribute("title", "BOUT++ grid file")
         f.write_file_attribute("software_name", "zoidberg")
-        f.write_file_attribute("software_version", __version__)
+        f.write_file_attribute("software_version", __version__) #TODO: Use zoidberg version eventually...?
         grid_id = str(uuid.uuid1())
         f.write_file_attribute("id", grid_id)      #Conventional name
         f.write_file_attribute("grid_id", grid_id) #BOUT++ specific name
@@ -584,9 +693,9 @@ def main(args):
         for key, value in metric.items():
             f.write(key, value)
 
-        f.write("B", Bmag[:,np.newaxis,:])
+        f.write("B", Bmag3D)
 
-        f.write("pressure", pres[:,np.newaxis,:])
+        f.write("pressure", make_3d(pres, nphi))
 
         for key, value in attributes.items():
             f.write(key, value)
@@ -594,8 +703,6 @@ def main(args):
         for key, value in maps.items():
             f.write(key, value)
 
-    #Generate data for plotting on full grid with ghost points.
-    psi = psi_func(R,Z)
     #Build a Rectangle at (rmin, zmin) with width/height to show ghost point border.
     ghost = Rectangle((rmin, zmin),
                      rmax - rmin,
