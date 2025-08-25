@@ -7,17 +7,157 @@ from matplotlib import path as path
 from matplotlib import pyplot as plt
 from matplotlib.patches import PathPatch
 from matplotlib.patches import Rectangle
+import numpy as np
 from scipy import integrate,interpolate
 from scipy.spatial import cKDTree as KDTree
-import numpy as np
 
 from boututils import datafile as bdata
 from hypnotoad import __version__
 from hypnotoad.geqdsk._geqdsk import read as gq_read
 from hypnotoad.utils.critical import find_critical as fc
 
-import stencil_dagp_fv
-import poloidal_grid2
+def calc_vol(Rc, Jp, dx=1.0, dz=1.0):
+    """
+    Per-radian control volume A_R at centers from radius Rc and poloidal Jacobian Jp.
+    Rc, Jp can be (nx,nz) arrays; dx,dz are logical spacings.
+    Multiply by 2*pi for full volume.
+    """
+    return Rc* Jp * dx * dz
+
+def pad_to_full(arr, nx, nz, *,
+                dim='x',        # Update x or z.
+                faces="plus",   # "plus" = +x/+z faces; "minus" = left/down faces
+                pad="zero"):    # "zero" or "nan"
+    """
+    fx: (nx-1, nz) scalar on x-faces
+    fz: (nx, nz-1) scalar on z-faces
+    Returns (fx_full, fz_full) each (nx, nz), with the unused edge padded.
+    """
+    fill = 0.0 if pad == "zero" else np.nan
+    new_arr = np.full((nx, nz), fill, float)
+
+    key = (dim, faces)
+    try:
+        #Note, for slices None means all, i.e. a colon. Basically take no slice here.
+        r, c = {
+            ("x", "plus"):  (slice(0, nx-1), slice(None)),
+            ("x", "minus"): (slice(1, nx),   slice(None)),
+            ("z", "plus"):  (slice(None),   slice(0, nz-1)),
+            ("z", "minus"): (slice(None),   slice(1, nz)),
+        }[key]
+    except KeyError as e:
+        raise ValueError(f"Invalid combination: dim={dim!r}, faces={faces!r}") from e
+    
+    new_arr[r, c] = arr
+
+    return new_arr
+
+def face_metrics_from_centers(gxx_c, gxz_c, gzz_c, *, periodic_x=False, periodic_z=False):
+    """
+    Inputs (cell-centered, shape = (nx, nz)):
+      gxx_c, gxz_c, gzz_c : contravariant metric entries at cell centers.
+
+    Returns dict with face-centered tensors:
+      xface: contravariant (gxx,gxz,gzz) on +x faces shape (nx-1, nz),
+             covariant    (g_xx,g_xz,g_zz) on +x faces shape (nx-1, nz)
+      zface: contravariant (gxx,gxz,gzz) on +z faces shape (nx, nz-1),
+             covariant    (g_xx,g_xz,g_zz) on +z faces shape (nx, nz-1)
+    """
+    gxx_c = np.asarray(gxx_c); gxz_c = np.asarray(gxz_c); gzz_c = np.asarray(gzz_c)
+    nx, nz = gxx_c.shape
+
+    # --- arithmetic averages of contravariant entries to faces ---
+    # +x faces between i and i+1
+    gxx_x = 0.5*(gxx_c[:-1, :] + gxx_c[1:, :])
+    gxz_x = 0.5*(gxz_c[:-1, :] + gxz_c[1:, :])
+    gzz_x = 0.5*(gzz_c[:-1, :] + gzz_c[1:, :])
+
+    # +z faces between j and j+1
+    gxx_z = 0.5*(gxx_c[:, :-1] + gxx_c[:, 1:])
+    gxz_z = 0.5*(gxz_c[:, :-1] + gxz_c[:, 1:])
+    gzz_z = 0.5*(gzz_c[:, :-1] + gzz_c[:, 1:])
+
+    # Optional periodic wrap (use if your centers are periodic in that dir)
+    if periodic_x:
+        gxx_x = np.vstack([gxx_c[-1:,:]*0.5 + gxx_c[:1,:]*0.5,  # i = nx-1 with i=0
+                           gxx_x[1:]])
+        gxz_x = np.vstack([gxz_c[-1:,:]*0.5 + gxz_c[:1,:]*0.5, gxz_x[1:]])
+        gzz_x = np.vstack([gzz_c[-1:,:]*0.5 + gzz_c[:1,:]*0.5, gzz_x[1:]])
+    if periodic_z:
+        gxx_z = np.hstack([gxx_c[:,:1]*0.5 + gxx_c[:,-1:]*0.5, gxx_z[:,1:]])
+        gxz_z = np.hstack([gxz_c[:,:1]*0.5 + gxz_c[:,-1:]*0.5, gxz_z[:,1:]])
+        gzz_z = np.hstack([gzz_c[:,:1]*0.5 + gzz_c[:,-1:]*0.5, gzz_z[:,1:]])
+
+    # --- invert averaged contravariant tensor to get covariant at faces ---
+    # For a 2x2 SPD matrix [[a,b],[b,c]], inverse is (1/det)*[[c,-b],[-b,a]]
+    det_x = gxx_x*gzz_x - gxz_x*gxz_x
+    g_xx_x =  gzz_x/det_x
+    g_xz_x = -gxz_x/det_x
+    g_zz_x =  gxx_x/det_x
+
+    det_z = gxx_z*gzz_z - gxz_z*gxz_z
+    g_xx_z =  gzz_z/det_z
+    g_xz_z = -gxz_z/det_z
+    g_zz_z =  gxx_z/det_z
+
+    return dict(
+        xface=dict(ctr=(gxx_x, gxz_x, gzz_x), cov=(g_xx_x, g_xz_x, g_zz_x)),
+        zface=dict(ctr=(gxx_z, gxz_z, gzz_z), cov=(g_xx_z, g_xz_z, g_zz_z)),
+    )
+
+def R_faces_from_centers(Rc, *, periodic_z=False, use_abs=False):
+    """
+    Rc : 2D array (nx, nz) of cell-centered R (can be signed).
+    Returns:
+      Rx_face : (nx-1, nz) R at +x faces
+      Rz_face : (nx, nz-1) R at +z faces
+    """
+    Rc = np.asarray(Rc, float)
+
+    # +x faces: average neighbors in x
+    Rx_face = 0.5 * (Rc[1:, :] + Rc[:-1, :])          # (nx-1, nz)
+
+    # +z faces: average neighbors in z
+    if periodic_z:
+        Rz_face = 0.5 * (Rc + np.roll(Rc, -1, axis=1))[:, :-1]  # drop last to keep (nx, nz-1)
+    else:
+        Rz_face = 0.5 * (Rc[:, 1:] + Rc[:, :-1])      # (nx, nz-1)
+
+    if use_abs:
+        Rx_face = np.abs(Rx_face)
+        Rz_face = np.abs(Rz_face)
+
+    return Rx_face, Rz_face
+
+def fac_per_area_from_faces(face_metrics, dx, dz):
+    """
+    Build the *per-area* face factors that match your raw-jump stencil:
+      x-face: fac_XX = √(g^{xx})/Δx,  fac_XZ = (g^{xz}/√(g^{xx})) * 1/(2Δz)
+      z-face: fac_ZZ = √(g^{zz})/Δz,  fac_ZX = (g^{xz}/√(g^{zz})) * 1/(2Δx)
+    """
+    (gxx_x, gxz_x, gzz_x) = face_metrics["xface"]["ctr"]
+    (gxx_z, gxz_z, gzz_z) = face_metrics["zface"]["ctr"]
+
+    fac_XX = np.sqrt(gxx_x) / dx
+    fac_XZ = (gxz_x / np.sqrt(gxx_x)) * (1.0 / (2.0*dz))
+
+    fac_ZZ = np.sqrt(gzz_z) / dz
+    fac_ZX = (gxz_z / np.sqrt(gzz_z)) * (1.0 / (2.0*dx))
+    return fac_XX, fac_XZ, fac_ZZ, fac_ZX
+
+def face_lengths_from_faces(face_metrics, dx, dz):
+    """
+    If you want *integrated* flux coefficients, multiply per-area factors by face length:
+      ℓ_x = ||a_z|| Δz = √(g_zz) Δz   (use covariant g_zz on x-faces)
+      ℓ_z = ||a_x|| Δx = √(g_xx) Δx   (use covariant g_xx on z-faces)
+    """
+    (_, _, g_zz_x) = face_metrics["xface"]["cov"]  # covariant on x-faces
+    (g_xx_z, _, _) = face_metrics["zface"]["cov"]
+
+    #Note: Lz_x here means length in z on x face and so on.
+    Lz_x = np.sqrt(g_zz_x) * dz   # shape (nx-1, nz)
+    Lx_z = np.sqrt(g_xx_z) * dx   # shape (nx, nz-1)
+    return Lz_x, Lx_z
 
 def make_3d(arr_2d: np.ndarray, ny: int) -> np.ndarray:
     """
@@ -26,33 +166,6 @@ def make_3d(arr_2d: np.ndarray, ny: int) -> np.ndarray:
     """
 
     return np.repeat(arr_2d[:, np.newaxis, :], ny, axis=1)
-
-def edges_from_centers(c):
-    """Face edges from center coords via linear extrapolation at both ends."""
-    c = np.asarray(c, dtype=float)
-    if c.size < 2:
-        raise ValueError("Need at least 2 centers to form edges.")
-    e = np.empty(c.size + 1, dtype=float)
-    e[1:-1] = 0.5 * (c[:-1] + c[1:])
-    e[0]    = c[0] - 0.5 * (c[1] - c[0])
-    e[-1]   = c[-1] + 0.5 * (c[-1] - c[-2])
-    return e
-
-def Ar_from_centers(R_centers, Z_centers):
-    """
-    Compute A_R = ∬ R dA for each rectangular cell, returned at cell centers.
-    R_centers, Z_centers: 1D arrays of cell-center coordinates (in meters).
-    Returns Ar with shape (len(R_centers), len(Z_centers)).
-    """
-    Re = edges_from_centers(R_centers)  # shape NR+1
-    Ze = edges_from_centers(Z_centers)  # shape NZ+1
-
-    Rm, Rp = Re[:-1], Re[1:]            # left/right faces per cell
-    Zm, Zp = Ze[:-1], Ze[1:]            # bottom/top faces per cell
-
-    # Ar[i,j] = 0.5*(R_{i+1/2,+}^2 - R_{i+1/2,-}^2) * (Z_{j+1/2,+} - Z_{j+1/2,-})
-    Ar = 0.5 * (Rp**2 - Rm**2)[:, None] * (Zp - Zm)[None, :]
-    return Ar
 
 def setup_field_line_interpolation(R_grid, Z_grid, dRdphi, dZdphi, linear=0):
     """
@@ -212,7 +325,7 @@ def getCoordinateOrig(R, Z, spl_r, spl_z, xind, zind, dx=0, dz=0):
     return R, Z
 
 #NOTE: Taken from zoidberg StructuredPoloidalGrid.
-def get_metric(R, Z, nx, nz, nxpad, nzpad):
+def get_metric(R, Z, nx, nz, dx, dz):
     #Get arrays of indices.
     xind, zind = np.meshgrid(np.arange(nx), np.arange(nz), indexing="ij")
 
@@ -228,8 +341,8 @@ def get_metric(R, Z, nx, nz, nxpad, nzpad):
     #      3 : spatial: \theta
     ddist = np.sqrt(np.sum(dolddnew**2, axis=1)) #Sum R + Z
     nx, nz = ddist.shape[1:]
-    ddist[0] = 1 / (nx - 2*nxpad - 1)
-    ddist[1] = 1 / (nz - 2*nzpad - 1)
+    ddist[0] = dx
+    ddist[1] = dz
     dolddnew /= ddist[:,None,...]
 
     #g_ij = J_ki J_kj
@@ -432,8 +545,8 @@ def main(args):
     p_spl = interpolate.InterpolatedUnivariateSpline(psi1D, prsr, ext=3)
 
     #Generate simulation grid (lower res + guard cells)
-    #TODO: Can pad in z as well in full FCI case, but wont matter if gfile large outside mask.
-    rpad, phipad, zpad = 2,1,0 #0 #Padding/ghost cells in R. No padding in Z, and 1 in Y according to zoidberg, why?
+    #TODO: Can pad in z as well in full FCI case, but wont matter if gfile large outside mask. Not sure BOUT handles Z padding?
+    rpad, phipad, zpad = 2,1,0 #0 #Padding/ghost cells on each end.
     grid_res, phi_res = 64, 16
     nr, nphi, nz = grid_res, 1, grid_res
     phi_val = 0 #Take phi=0 to be starting point.
@@ -444,9 +557,11 @@ def main(args):
         phi_arr = np.linspace(phi_val, 2*np.pi, nphi, endpoint=False) #Periodic so dont go all the way.
         dphi = phi_arr[1]-phi_arr[0]
         nphi = phi_res
-    #nrp, nzp = nr + 2*rpad, nz + 2*zpad
+        
     ##Method 1: Concatenate ghost points onto initial grid so 64x64 goes to 68x64.
+    #nrp, nzp = nr + 2*rpad, nz + 2*zpad
     ##dR, dZ = R[1]-R[0], Z[1]-Z[0]
+    ##dx, dz = 1/(nr-1), 1/(nz-1)
     ##rp_min, rp_max = rmin - rpad*dR, rmax + rpad*dR
     ##zp_min, zp_max = zmin - zpad*dZ, zmax + zpad*dZ
     ##ghosts_lo_R, ghosts_hi_R = R[0] - dR*np.arange(rpad, 0, -1), R[-1] + dR*np.arange(1, rpad + 1)
@@ -460,7 +575,8 @@ def main(args):
     #psi_int = psi[rpad:-rpad, :] if zpad == 0 else psi[rpad:-rpad, zpad:-zpad]
     # psi_int.shape == (60, 64)
 
-    #Method 2: Replace original points with ghost points so grid 64x64 for Structured class which requires nx == nz for now.
+    #Method 2: Replace original points with ghost points so grid 64x64 for
+    #Structured class which requires nx == nz for now. Technically a lower res grid.
     nrp, nzp = nr, nz
     R, Z = np.linspace(rmin, rmax, nr - 2*rpad), np.linspace(zmin, zmax, nz - 2*zpad)
     dR = R[1] - R[0]
@@ -472,6 +588,7 @@ def main(args):
     R = np.concatenate((ghosts_lo_R, R, ghosts_hi_R))
     Z = np.concatenate((ghosts_lo_Z, Z, ghosts_hi_Z))
     RR, ZZ = np.meshgrid(R,Z,indexing='ij')
+    dr, dz = 1/(nrp - 2*rpad - 1), 1/(nzp - 2*zpad - 1)
 
     #Calculate field components following COCOS convention.
     Bp_R =  sign_ip*psi_func(R, Z, dy=1)/RR
@@ -568,15 +685,14 @@ def main(args):
 
     #Generate metric and maps and so on to write out for BSTING.
     print("Generating metric and map data for output file...")
-    #TODO: Generate interpolation weights per zoidberg? Can run BSTING without it first and add later.
     psi = psi_func(R,Z)
     attributes = {
         "psi": make_3d(psi, nphi)
     }
     #Need to do this all in 3D now, didn't need the complication before.
     R3, phi3, Z3 = np.meshgrid(R, phi_arr, Z, indexing='ij')
-    fwd_xtp, fwd_ztp = findIndex(Rfwd, Zfwd, R[0], Z[0], R[1]-R[0], Z[1]-Z[0], rbdy, zbdy)
-    bwd_xtp, bwd_ztp = findIndex(Rbwd, Zbwd, R[0], Z[0], R[1]-R[0], Z[1]-Z[0], rbdy, zbdy)
+    fwd_xtp, fwd_ztp = findIndex(Rfwd, Zfwd, R[0], Z[0], R[1]-R[0], Z[1]-Z[0], rlmt, zlmt, show=True)
+    bwd_xtp, bwd_ztp = findIndex(Rbwd, Zbwd, R[0], Z[0], R[1]-R[0], Z[1]-Z[0], rlmt, zlmt, show=True)
 
     maps = {
         "R": R3,
@@ -595,9 +711,9 @@ def main(args):
 
     #Store metric info. #TODO: Tokamak metric 3D for now, can update zoidberg to 2D, removing phi?
     #And work in 3D for stellarator/mirror cases.
-    ctr_metric = get_metric(R3[:,0,:], Z3[:,0,:], nrp, nzp, rpad, zpad)
-    fwd_metric = get_metric(Rfwd, Zfwd, nrp, nzp, rpad, zpad)
-    bwd_metric = get_metric(Rbwd, Zbwd, nrp, nzp, rpad, zpad)
+    ctr_metric = get_metric(R3[:,0,:], Z3[:,0,:], nrp, nzp, dr, dz)
+    fwd_metric = get_metric(Rfwd, Zfwd, nrp, nzp, dr, dz)
+    bwd_metric = get_metric(Rbwd, Zbwd, nrp, nzp, dr, dz)
     Bmag3D = make_3d(Bmag, nphi)
     Bphi3D = make_3d(Bphi, nphi)
     parFac = Bmag3D/Bphi3D
@@ -642,31 +758,33 @@ def main(args):
     metric.update({k: v/parFac**2 for k, v in metric.items() if k in ("g22", "forward_g22", "backward_g22")})
     metric.update({k: v*parFac**2 for k, v in metric.items() if k in ("g_22", "forward_g_22", "backward_g_22")})
 
-    #Generate divergence operators as well.
-    #dagp_vars = stencil_dagp_fv.doit([poloidal_grid2.StructuredPoloidalGrid(RR,ZZ)],plot=True)
-    ##TODO: Using non-periodic z and nx != nz seems to cause nans in dagp vars.
-    ##Replace with best fit based on data for now.
-    #for val in dagp_vars["dagp_fv_XX"]:
-    #    val[0][0] = val[0][1]
-    #    val[0][-1] = val[0][-2]
-    #np.nan_to_num(dagp_vars["dagp_fv_XZ"], copy=False, nan=0.0)
-    ##Extend from length 1 to nphi.
-    #for key,val in dagp_vars.items():
-    #    dagp_vars[key] = np.repeat(val, nphi, axis=1)
-    #TODO: Make sure these values are correct/Get stencil code working for all cases?
-    dagp_fv_XX = np.full_like(R3, np.sqrt(metric["g11"])/(1/nrp))
-    dagp_fv_ZZ = np.full_like(R3, np.sqrt(metric["g33"])/(1/nzp))
-    dagp_fv_XZ = np.zeros_like(R3)
-    dagp_fv_ZX = np.zeros_like(R3)
-    dagp_fv_volume = make_3d(Ar_from_centers(R,Z), nphi)
+    #Generate finite volume operators following zoidberg stencil code.
+    #Jacobian assuming gxz = gzx.
+    jac = np.sqrt(ctr_metric["g_xx"]*ctr_metric["g_zz"]-ctr_metric["g_xz"]**2)
+    dagp_fv_volume = calc_vol(RR, jac, dr, dz)
+    faces = face_metrics_from_centers(ctr_metric["gxx"], ctr_metric["gxz"],
+                                      ctr_metric["gzz"], periodic_z=False)
+    fac_XX, fac_XZ, fac_ZZ, fac_ZX = fac_per_area_from_faces(faces, dr, dz)
+    # If you actually want the *integrated* coefficients (face-length included):
+    Lz_x, Lx_z = face_lengths_from_faces(faces, dr, dz)
+    Rx_face, Rz_face = R_faces_from_centers(RR, periodic_z=False, use_abs=False)
+    dagp_fv_XX = pad_to_full(fac_XX * Lz_x * Rx_face, nrp, nzp)
+    dagp_fv_XZ = pad_to_full(fac_XZ * Lz_x * Rx_face, nrp, nzp)
+    dagp_fv_ZZ = pad_to_full(fac_ZZ * Lx_z * Rz_face, nrp, nzp, dim='z')
+    dagp_fv_ZX = pad_to_full(fac_ZX * Lx_z * Rz_face, nrp, nzp, dim='z')
+
     dagp_vars = {
-        "dagp_fv_XX": dagp_fv_XX,
-        "dagp_fv_XZ": dagp_fv_XZ,
-        "dagp_fv_ZX": dagp_fv_ZX,
-        "dagp_fv_ZZ": dagp_fv_ZZ,
-        "dagp_fv_volume": dagp_fv_volume
+        "dagp_fv_XX": make_3d(dagp_fv_XX, nphi),
+        "dagp_fv_XZ": make_3d(dagp_fv_XZ, nphi),
+        "dagp_fv_ZX": make_3d(dagp_fv_ZX, nphi),
+        "dagp_fv_ZZ": make_3d(dagp_fv_ZZ, nphi),
+        "dagp_fv_volume": make_3d(dagp_fv_volume, nphi)
     }
     maps.update(dagp_vars)
+
+    #Calculate interpolation weights directly in python rather than BSTING.
+    #TODO: BSTING would need to read in weights still...BSTING can do bilinear or cubic hermite spline itself at the moment.
+    #weights = calc_weights(maps)
 
     #Write output to data file.
     gridfile = gfilename + ".fci.nc"
@@ -674,7 +792,7 @@ def main(args):
     with bdata.DataFile(gridfile, write=True, create=True, format="NETCDF4") as f:
         f.write_file_attribute("title", "BOUT++ grid file")
         f.write_file_attribute("software_name", "zoidberg")
-        f.write_file_attribute("software_version", __version__) #TODO: Use zoidberg version eventually...?
+        f.write_file_attribute("software_version", __version__)
         grid_id = str(uuid.uuid1())
         f.write_file_attribute("id", grid_id)      #Conventional name
         f.write_file_attribute("grid_id", grid_id) #BOUT++ specific name
