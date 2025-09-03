@@ -7,7 +7,7 @@ from matplotlib import path as path
 from matplotlib import pyplot as plt
 from matplotlib.patches import PathPatch
 from matplotlib.patches import Rectangle
-import numpy as np
+import numpy as np, time
 from scipy import integrate,interpolate
 from scipy.spatial import cKDTree as KDTree
 
@@ -24,6 +24,7 @@ def calc_vol(Rc, Jp, dx=1.0, dz=1.0):
     """
     return Rc* Jp * dx * dz
 
+#TODO: Padding value should depend on boundary conditions. Currently fill with 0s.
 def pad_to_full(arr, nx, nz, *,
                 dim='x',        # Update x or z.
                 faces="plus",   # "plus" = +x/+z faces; "minus" = left/down faces
@@ -90,6 +91,7 @@ def face_metrics_from_centers(gxx_c, gxz_c, gzz_c, *, periodic_x=False, periodic
 
     # --- invert averaged contravariant tensor to get covariant at faces ---
     # For a 2x2 SPD matrix [[a,b],[b,c]], inverse is (1/det)*[[c,-b],[-b,a]]
+    #TODO: Dont need to do this because have other components already.
     det_x = gxx_x*gzz_x - gxz_x*gxz_x
     g_xx_x =  gzz_x/det_x
     g_xz_x = -gxz_x/det_x
@@ -166,6 +168,176 @@ def make_3d(arr_2d: np.ndarray, ny: int) -> np.ndarray:
     """
 
     return np.repeat(arr_2d[:, np.newaxis, :], ny, axis=1)
+
+def _path_to_polyline(wall_path):
+    """Extract (Rw,Zw) vertex arrays from a matplotlib Path (single closed polygon)."""
+    verts = wall_path.vertices
+    codes = wall_path.codes
+    if codes is None:
+        Rw, Zw = verts[:,0], verts[:,1]
+    else:
+        mask = (codes != path.Path.CLOSEPOLY)
+        Rw, Zw = verts[mask,0], verts[mask,1]
+    return Rw, Zw
+
+def nearest_point_on_polyline(Rw, Zw, Rg, Zg, closed=True, eps=1e-14):
+    """Return (seg_index, t, Rb, Zb) where (Rb,Zb) is closest point on polyline to (Rg,Zg)."""
+    Rw = np.asarray(Rw); Zw = np.asarray(Zw)
+    if closed:
+        Rv = np.r_[Rw, Rw[0]]; Zv = np.r_[Zw, Zw[0]]
+    else:
+        Rv = Rw;             Zv = Zw
+
+    A = np.column_stack([Rv[:-1], Zv[:-1]])     # (M,2)
+    B = np.column_stack([Rv[1:],  Zv[1: ]])     # (M,2)
+    d = B - A                                   # segment vectors
+    v = np.array([Rg, Zg]) - A                  # A -> P
+
+    dd = np.sum(d*d, axis=1)
+    t  = np.clip(np.sum(v*d, axis=1) / np.maximum(dd, eps), 0.0, 1.0)
+    P  = A + t[:,None]*d
+    j  = int(np.argmin(np.sum((P - np.array([Rg,Zg]))**2, axis=1)))
+    return j, float(t[j]), P[j,0], P[j,1]
+
+def segment_unit_tangent(Rw, Zw, j, closed=True, eps=1e-14):
+    if closed:
+        Rv = np.r_[Rw, Rw[0]]; Zv = np.r_[Zw, Zw[0]]
+    else:
+        Rv = Rw;             Zv = Zw
+    d = np.array([Rv[j+1]-Rv[j], Zv[j+1]-Zv[j]])
+    L = np.hypot(d[0], d[1])
+    return d / (L if L > eps else 1.0)
+
+def segment_unit_normal_outward(T, Rb, Zb, Rg, Zg):
+    Nl = np.array([-T[1],  T[0]]); Nr = np.array([ T[1], -T[0]])
+    v  = np.array([Rg-Rb, Zg-Zb])  # boundary -> ghost
+    return Nl if np.dot(v, Nl) >= 0.0 else Nr
+
+def vertex_unit_normal(Rw, Zw, jv, Rg, Zg, closed=True, eps=1e-14):
+    M = len(Rw)
+    def wrap(i): return (i % M) if closed else np.clip(i, 0, M-2)
+    Tm = segment_unit_tangent(Rw, Zw, wrap(jv-1), closed, eps)
+    Tp = segment_unit_tangent(Rw, Zw, wrap(jv),   closed, eps)
+    Nm = segment_unit_normal_outward(Tm, Rw[jv], Zw[jv], Rg, Zg)
+    Np = segment_unit_normal_outward(Tp, Rw[jv], Zw[jv], Rg, Zg)
+    N  = Nm + Np
+    L  = np.hypot(N[0], N[1])
+    if L < eps:
+        # straight corner: pick whichever points more toward ghost
+        return Nm if np.dot([Rg-Rw[jv], Zg-Zw[jv]], Nm) >= 0 else Np
+    return N / L
+
+def reflect_ghost_across_wall(Rw, Zw, Rg, Zg, closed=True, eps=1e-14):
+    """
+    For ghost point Pg=(Rg,Zg): find nearest boundary point Pb, unit normal N (toward ghost),
+    signed normal distance s, and reflected image point Pimg = Pg - 2 s N.
+    Returns: (Rb,Zb), N (len-2), s, (Rimg,Zimg), (seg_index, t)
+    """
+    j, t, Rb, Zb = nearest_point_on_polyline(Rw, Zw, Rg, Zg, closed, eps)
+    if 0.0 + eps < t < 1.0 - eps:
+        T = segment_unit_tangent(Rw, Zw, j, closed, eps)
+        N = segment_unit_normal_outward(T, Rb, Zb, Rg, Zg)
+    else:
+        jv = (j + (t >= 1.0 - eps)) % len(Rw)
+        N  = vertex_unit_normal(Rw, Zw, jv, Rg, Zg, closed, eps)
+    s = np.dot([Rg-Rb, Zg-Zb], N)
+    Rimg, Zimg = Rg - 2.0*s*N[0], Zg - 2.0*s*N[1]
+    return (Rb, Zb), N, s, (Rimg, Zimg), (j, t)
+
+def ghost_mask(RR, ZZ, wall_path, connectivity=4, show=False, closed=True):
+    """
+    Ghost = outside cell that touches at least one inside neighbor.
+    connectivity: 4 or 8 neighborhood.
+    """
+    #TODO: Faster to work in 1d or 2d?
+    pts = np.column_stack([RR.ravel(), ZZ.ravel()])
+    inside = wall_path.contains_points(pts, radius=1e-12) #Bias points on edge as 1e-12 inside for positive... TODO: Do this for all path checking?
+    inside = inside.reshape(RR.shape)
+
+    # neighbors (booleans says: does this cell have an inside neighbor in that direction?)
+    left  = np.zeros_like(inside, bool)
+    right = np.zeros_like(inside, bool)
+    down  = np.zeros_like(inside, bool)
+    up    = np.zeros_like(inside, bool)
+    
+    left[1:,:]   = inside[:-1,:]
+    right[:-1,:] = inside[1:,:]
+    down[:,1:]   = inside[:,:-1]
+    up[:,:-1]    = inside[:,1:]
+
+    neighbor_any = left | right | up | down
+
+    if connectivity == 8:
+        ul = np.zeros_like(inside, bool)
+        ur = np.zeros_like(inside, bool)
+        dl = np.zeros_like(inside, bool)
+        dr = np.zeros_like(inside, bool)
+
+        ul[1:, 1:]  = inside[:-1, :-1]
+        ur[:-1,1:]  = inside[1:,  :-1]
+        dl[1:, :-1] = inside[:-1, 1: ]
+        dr[:-1,:-1] = inside[1:,   1: ]
+
+        neighbor_any |= (ul | ur | dl | dr)
+
+    ghost_mask = (~inside) & neighbor_any
+
+    #Now generate inside cells which touch outside ones.
+    outside = ~inside
+
+    left_out  = np.zeros_like(inside, bool)
+    right_out = np.zeros_like(inside, bool)
+    down_out  = np.zeros_like(inside, bool)
+    up_out    = np.zeros_like(inside, bool)
+
+    left_out[1:,  :]  = outside[:-1, :]
+    right_out[:-1, :] = outside[1:,  :]
+    down_out[:, 1:]   = outside[:, :-1]
+    up_out[:, :-1]    = outside[:, 1:]
+
+    touch = left_out | right_out | up_out | down_out
+
+    if connectivity == 8:
+        ul_out = np.zeros_like(inside, bool);  ul_out[1:, 1:]  = outside[:-1, :-1]
+        ur_out = np.zeros_like(inside, bool);  ur_out[:-1,1:]  = outside[1:,  :-1]
+        dl_out = np.zeros_like(inside, bool);  dl_out[1:, :-1] = outside[:-1, 1: ]
+        dr_out = np.zeros_like(inside, bool);  dr_out[:-1,:-1] = outside[1:,   1: ]
+        touch |= (ul_out | ur_out | dl_out | dr_out)
+
+    in_mask = inside & touch
+
+    Rw, Zw = _path_to_polyline(wall_path)
+    Rg = RR[ghost_mask]; Zg = ZZ[ghost_mask]
+
+    Rb_list, Zb_list = [], []
+    Rimg_list, Zimg_list = [], []
+    for rgi, zgi in zip(Rg, Zg):
+        (Rb, Zb), N, s, (Rimg, Zimg), _ = reflect_ghost_across_wall(Rw, Zw, rgi, zgi, closed=closed)
+        Rb_list.append(Rb);   Zb_list.append(Zb)
+        Rimg_list.append(Rimg); Zimg_list.append(Zimg)
+
+    if show:
+        fig, ax = plt.subplots(figsize=(8,6))
+        patch = PathPatch(wall_path, facecolor='none', edgecolor='k', lw=2)
+        ax.add_patch(patch)
+
+        # ghost (green) and boundary-inside (blue)
+        ax.scatter(RR[ghost_mask], ZZ[ghost_mask], s=16, c='g',   marker='o', label='ghost')
+        ax.scatter(RR[in_mask],    ZZ[in_mask],    s=16, c='blue',marker='o', label='inner')
+
+        # image points (red)
+        ax.scatter(Rimg_list, Zimg_list, s=20, c='red', marker='o', label='image')
+
+        # red intercept lines: ghost → boundary intercept
+        for rgi, zgi, rbi, zbi, rimi, zimi in zip(Rg, Zg, Rb_list, Zb_list, Rimg_list, Zimg_list):
+            ax.plot([rgi, rbi, rimi], [zgi, zbi, zimi], 'r-', lw=2, alpha=0.6)
+
+        ax.set_aspect('equal', 'box')
+        ax.set_xlabel('R'); ax.set_ylabel('Z')
+        ax.legend(loc='best')
+        plt.tight_layout(); plt.show()
+
+    return ghost_mask
 
 def setup_field_line_interpolation(R_grid, Z_grid, dRdphi, dZdphi, linear=0):
     """
@@ -255,7 +427,7 @@ def trace_field_line(R0, Z0, zeta_init, zeta_target, field_line_rhs):
     
     return sol
 
-#TODO: Clean up this functionality? Recombine with getCoordinate.
+#TODO: Clean up this functionality? Recombine with getCoordinate. Also clean up down to findIndex().
 #Note column stack for tree, so nr != nz is ok. Need to make sure this is fine in zoidberg to update and remove asserts.
 #Also remove temp files and access classes in zoidberg directly (and transfer bug fixes therein?)
 #Also have meshgrids multiple places now.
@@ -492,7 +664,9 @@ def plot(R, Z, psi, ghost, rbdy, zbdy, rlmt, zlmt, sign_b0,
 
 def main(args):
     #Read eqdsk file.
-    gfile_dir = "/home/tirkas1/Workspace/TokData/DIIID/"
+    gfile_dir = "/home/tirkas1/Workspace/TokData/"
+    device = "DIIID" + "/"
+    #device = "TCV" + "/"
     gfile1 = "g162940.02944_670" #Old ql one.
     gfile2 = "g163241.03500" #Old DIIID one.
     #Ben's test cases for varying Ip and B0 directions.
@@ -500,8 +674,10 @@ def main(args):
     gfile4 = "g174791.03000"
     gfile5 = "g176413.03000"
     gfile6 = "g176312.03000"
+    #TCV Case for simpler geometry.
+    gfile7 = "65402_t1.eqdsk" #TODO: Need to make sure nr != nz is ok. TCV quite elongated.
     gfilename = gfile1
-    gfilepath = gfile_dir + gfilename
+    gfilepath = gfile_dir + device + gfilename
     print("Reading EQDSK file...")
     with open(gfilepath, "r", encoding="utf-8") as file:
         gfile = gq_read(file)
@@ -539,6 +715,7 @@ def main(args):
 
     #Toroidal field component and q(psi).
     psi1D = np.linspace(paxis, pbdry, nrg)
+    #psi1D = np.linspace(pbdry, paxis, nrg) #TODO: For TCV it seems r is backwards??? Different cocos convention?
     #TODO: Why doesnt ext=0 work ok when tracing field?
     f_spl = interpolate.InterpolatedUnivariateSpline(psi1D, fpol, ext=3) #ext=3 uses boundary values outside range.
     q_spl = interpolate.InterpolatedUnivariateSpline(psi1D, qpsi, ext=3) #ext=0 uses extrapolation as with RectBivSpline on 2D but doesnt work in the integrator.
@@ -546,9 +723,9 @@ def main(args):
 
     #Generate simulation grid (lower res + guard cells)
     #TODO: Can pad in z as well in full FCI case, but wont matter if gfile large outside mask. Not sure BOUT handles Z padding?
-    rpad, phipad, zpad = 2,1,0 #0 #Padding/ghost cells on each end.
-    grid_res, phi_res = 64, 16
-    nr, nphi, nz = grid_res, 1, grid_res
+    rpad, phipad, zpad = 2, 1, 2 #Padding/ghost cells on each end.
+    r_res, phi_res, z_res = 516, 64, 516
+    nr, nphi, nz = r_res, 1, z_res
     phi_val = 0 #Take phi=0 to be starting point.
     dphi = 2*np.pi/phi_res
     phi_arr = [dphi]
@@ -557,7 +734,7 @@ def main(args):
         phi_arr = np.linspace(phi_val, 2*np.pi, nphi, endpoint=False) #Periodic so dont go all the way.
         dphi = phi_arr[1]-phi_arr[0]
         nphi = phi_res
-        
+
     ##Method 1: Concatenate ghost points onto initial grid so 64x64 goes to 68x64.
     #nrp, nzp = nr + 2*rpad, nz + 2*zpad
     ##dR, dZ = R[1]-R[0], Z[1]-Z[0]
@@ -575,7 +752,7 @@ def main(args):
     #psi_int = psi[rpad:-rpad, :] if zpad == 0 else psi[rpad:-rpad, zpad:-zpad]
     # psi_int.shape == (60, 64)
 
-    #Method 2: Replace original points with ghost points so grid 64x64 for
+    #Method 2: Replace original points with ghost points so grid starts 68x68 for 64x64-based resolution. (Required by BOUT!)
     #Structured class which requires nx == nz for now. Technically a lower res grid.
     nrp, nzp = nr, nz
     R, Z = np.linspace(rmin, rmax, nr - 2*rpad), np.linspace(zmin, zmax, nz - 2*zpad)
@@ -672,7 +849,11 @@ def main(args):
     Rbwd = bwdPts[:,0].reshape(nrp, nzp)
     Zbwd = bwdPts[:,1].reshape(nrp, nzp)
 
-    #Plot points scattered to test grid point following in general.
+    #Generate ghost point mask.
+    print("Generating ghost cells and boundary conditions...")
+    ghosts = ghost_mask(RR, ZZ, wall_path, show=True)
+
+    #Get scatter point data to plot and test grid point following in general.
     step = 100
     indices = np.arange(0, gridPts.shape[0], step)
     gridPtsFinal = gridPts[indices]
@@ -762,6 +943,9 @@ def main(args):
     #Jacobian assuming gxz = gzx.
     jac = np.sqrt(ctr_metric["g_xx"]*ctr_metric["g_zz"]-ctr_metric["g_xz"]**2)
     dagp_fv_volume = calc_vol(RR, jac, dr, dz)
+    #TODO Recalculate face metric and face R,Z from splines, like stencil code does.
+    #Note: I think this means use the same x,z -> R,Z spline, but with x,z +/- 0.5?
+    #This doesnt necessarily mean halfway between Rs and Zs does it? Well my ways match for rect grid...
     faces = face_metrics_from_centers(ctr_metric["gxx"], ctr_metric["gxz"],
                                       ctr_metric["gzz"], periodic_z=False)
     fac_XX, fac_XZ, fac_ZZ, fac_ZX = fac_per_area_from_faces(faces, dr, dz)
@@ -841,3 +1025,82 @@ def main(args):
 
 if __name__ == "__main__":
     main(sys.argv[1:])
+
+###################
+####DAGP TEST CODE:
+###
+###from numpy.polynomial.legendre import leggauss
+###
+#### ---- You provide these two callables (splines or analytic) ----
+#### Each must accept arrays x,z and return arrays of same shape.
+###R   = lambda x,z: Rspl.ev(x,z)            # or analytic R(x,z)
+###Rx  = lambda x,z: Rspl.ev(x,z, dx=1)      # dR/dx
+###Rz  = lambda x,z: Rspl.ev(x,z, dy=1)      # dR/dz
+###Z   = lambda x,z: Zspl.ev(x,z)
+###Zx  = lambda x,z: Zspl.ev(x,z, dx=1)
+###Zz  = lambda x,z: Zspl.ev(x,z, dy=1)
+###
+###def cov_metrics(x,z):
+###    Rxv,Rzv,Zxv,Zzv = Rx(x,z), Rz(x,z), Zx(x,z), Zz(x,z)
+###    gxx = Rxv*Rxv + Zxv*Zxv
+###    gxz = Rxv*Rzv + Zxv*Zzv
+###    gzz = Rzv*Rzv + Zzv*Zzv
+###    rtg = np.sqrt(np.maximum(gxx*gzz - gxz*gxz, 0.0))  # |J|
+###    return gxx, gxz, gzz, rtg
+###
+###def volumes_gauss(nx,nz, p=2, dx=1.0,dz=1.0):
+###    xi,w = leggauss(p)
+###    ii = np.arange(nx)[:,None,None,None]
+###    jj = np.arange(nz)[None,:,None,None]
+###    X = ii + 0.5*xi[None,None,:,None]
+###    Z = jj + 0.5*xi[None,None,None,:]
+###    X = np.broadcast_to(X, (nx,nz,p,p))
+###    Z = np.broadcast_to(Z, (nx,nz,p,p))
+###    gxx,gxz,gzz,rtg = cov_metrics(X,Z)
+###    vol = (dx*dz)/(4.0) * np.sum((w[:,None]*w[None,:])[None,None]* R(X,Z)*rtg, axis=(2,3))
+###    return vol
+###
+###def xface_facs_gauss(nx,nz, p=2, dz=1.0):
+###    xi,w = leggauss(p)
+###    X = (np.arange(nx-1)+0.5)[:,None,None]
+###    Z = np.arange(nz)[None,:,None] + 0.5*xi[None,None,:]
+###    X = np.broadcast_to(X, (nx-1,nz,p)); Z = np.broadcast_to(Z, (nx-1,nz,p))
+###    gxx,gxz,gzz,rtg = cov_metrics(X,Z)
+###    facXX = -(dz/2.0)*np.sum(w*( R(X,Z)*gzz/rtg ), axis=-1)
+###    facXZ =  (dz/2.0)*np.sum(w*( R(X,Z)*gxz/rtg ), axis=-1)
+###    return facXX, facXZ
+###
+###def zface_facs_gauss(nx,nz, p=2, dx=1.0):
+###    xi,w = leggauss(p)
+###    X = np.arange(nx)[:,None,None] + 0.5*xi[None,None,:]
+###    Z = (np.arange(nz-1)+0.5)[None,:,None]
+###    X = np.broadcast_to(X, (nx,nz-1,p)); Z = np.broadcast_to(Z, (nx,nz-1,p))
+###    gxx,gxz,gzz,rtg = cov_metrics(X,Z)
+###    facZX = -(dx/2.0)*np.sum(w*( R(X,Z)*gxz/rtg ), axis=-1)
+###    facZZ =  (dx/2.0)*np.sum(w*( R(X,Z)*gxx/rtg ), axis=-1)
+###    return facZX, facZZ
+###
+#### --- Reference (e.g., 8x8 and 8-pt) ---
+###def volumes_ref(nx,nz):        return volumes_gauss(nx,nz,p=8)
+###def xfaces_ref(nx,nz):         return xface_facs_gauss(nx,nz,p=8)
+###def zfaces_ref(nx,nz):         return zface_facs_gauss(nx,nz,p=8)
+###
+#### --- Method 2 (midpoint) just for volumes; faces analogous at face centers ---
+###def volumes_midpoint(nx,nz, dx=1.0,dz=1.0):
+###    ii,jj = np.meshgrid(np.arange(nx), np.arange(nz), indexing='ij')
+###    gxx,gxz,gzz,rtg = cov_metrics(ii,jj)
+###    return R(ii,jj)*rtg*dx*dz
+###
+#### Timing/accuracy example for one grid:
+###def benchmark(nx,nz,R,Z,Rx,Rz,Zx,Zz):
+###    t0=time.perf_counter()
+###    vref=volumes_ref(nx,nz); t1=time.perf_counter()
+###    v2  =volumes_midpoint(nx,nz); t2=time.perf_counter()
+###    v3  =volumes_gauss(nx,nz,p=2); t3=time.perf_counter()
+###    print(f"ref 8x8: {t1-t0:.3f}s  | midpoint: {t2-t1:.3f}s  | 2x2 Gauss: {t3-t2:.3f}s")
+###    rel2 = lambda a,b: np.linalg.norm((a-b).ravel())/np.linalg.norm(b.ravel())
+###    relinf=lambda a,b: np.max(np.abs(a-b))/np.max(np.abs(b))
+###    print(f"midpoint err L2={rel2(v2,vref):.3e}, Linf={relinf(v2,vref):.3e}")
+###    print(f"2x2 Gauss err L2={rel2(v3,vref):.3e}, Linf={relinf(v3,vref):.3e}")
+###
+###################
