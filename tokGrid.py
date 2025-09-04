@@ -169,6 +169,180 @@ def make_3d(arr_2d: np.ndarray, ny: int) -> np.ndarray:
 
     return np.repeat(arr_2d[:, np.newaxis, :], ny, axis=1)
 
+# ---------- helpers (Wikipedia form + basic geometry) ----------
+
+def _ensure_closed(Rw, Zw, tol=1e-12):
+    Rw = np.asarray(Rw); Zw = np.asarray(Zw)
+    if np.hypot(Rw[0]-Rw[-1], Zw[0]-Zw[-1]) > tol:
+        Rw = np.r_[Rw, Rw[0]]
+        Zw = np.r_[Zw, Zw[0]]
+    return Rw, Zw
+
+def _path_to_polyline(wall_path: path.Path):
+    verts = wall_path.vertices
+    codes = wall_path.codes
+    if codes is None:
+        Rw, Zw = verts[:,0], verts[:,1]
+    else:
+        mask = (codes != path.Path.CLOSEPOLY)  # drop CLOSEPOLY sentinel row
+        Rw, Zw = verts[mask,0], verts[mask,1]
+    return Rw, Zw
+
+def _foot_on_segment_wiki(A, B, P, tol_interior=0.0, eps=1e-14):
+    """
+    Wikipedia form: line x = a + t n, with |n|=1 (n is the unit tangent A->B).
+    Returns (is_interior, foot, dist_perp, unit_tangent, s_along, seg_len)
+    """
+    d = B - A
+    L = np.hypot(d[0], d[1])
+    if L < eps:
+        return False, A.copy(), np.hypot(*(P - A)), np.array([1.0, 0.0]), 0.0, 0.0
+    n = d / L
+    s = np.dot(P - A, n)                  # scalar along A->B
+    foot = A + s * n                      # orthogonal foot on infinite line
+    w = (A - P) - np.dot(A - P, n) * n    # perpendicular component (Wikipedia)
+    dist = np.hypot(w[0], w[1])
+    inside = (s > tol_interior) and (s < L - tol_interior)
+    return inside, foot, dist, n, s, L
+
+def _vertex_bisector_normal(Rw, Zw, k, G):
+    """Bisector of incident normals at vertex k, pointing toward G."""
+    M = len(Rw) - 1
+    km, kp = (k-1) % M, (k+1) % M
+    A_prev, B_prev = np.array([Rw[km], Zw[km]]), np.array([Rw[k],  Zw[k]])
+    A_next, B_next = np.array([Rw[k],  Zw[k]]), np.array([Rw[kp], Zw[kp]])
+
+    def unit_tan(A,B):
+        d = B - A; L = np.hypot(d[0], d[1])
+        return (d/L) if L > 0 else np.array([1.0, 0.0])
+
+    t_prev = unit_tan(A_prev, B_prev)
+    t_next = unit_tan(A_next, B_next)
+
+    def toward_ghost_norm(t):
+        Nl, Nr = np.array([-t[1],  t[0]]), np.array([ t[1], -t[0]])
+        v = G - np.array([Rw[k], Zw[k]])
+        return Nl if np.dot(v, Nl) >= np.dot(v, Nr) else Nr
+
+    Np = toward_ghost_norm(t_prev)
+    Nn = toward_ghost_norm(t_next)
+    N  = Np + Nn
+    L  = np.hypot(N[0], N[1])
+    return (N / L) if L > 0 else toward_ghost_norm(t_prev)
+
+# ---------- main: vertex-first, expand-until-outside ----------
+
+def reflect_ghost_across_wall_local_expand(
+    wall_path: path.Path,
+    Rg: float, Zg: float,
+    tol_interior: float = 0.0,   # exclude endpoints if >0
+    probe: float = 1e-9,         # tiny step for inside/outside test
+    bias: float = 1e-12,         # contains_point radius bias
+    eps: float = 1e-14,
+    max_steps: int | None = None # cap segment checks per direction (optional)
+):
+    """
+    Start at nearest vertex; expand along both directions.
+    Accept a segment if:
+      - perpendicular foot lies strictly inside the segment
+      - exactly one side (by a tiny normal step) is inside the wall
+    Stop expanding in a direction once neither normal side is inside.
+    If no valid segment is found, fall back to the nearest vertex.
+
+    Returns
+    -------
+    (Rb, Zb) : boundary intercept
+    N_out    : unit normal pointing from boundary toward ghost
+    s        : signed outward distance (>=0)
+    (Rimg, Zimg) : reflected image (inside)
+    info     : diagnostics dict
+    """
+    # 1) polyline + nearest vertex
+    Rw, Zw = _path_to_polyline(wall_path)
+    Rw, Zw = _ensure_closed(Rw, Zw, tol=eps)
+    M = len(Rw) - 1
+    G = np.array([Rg, Zg])
+
+    V = np.column_stack([Rw[:-1], Zw[:-1]])  # all vertices except duplicate last
+    k0 = int(np.argmin(np.sum((V - G)**2, axis=1)))
+
+    if max_steps is None:
+        max_steps = M
+
+    best = None  # (dist, j, foot, N_out)
+
+    # 2) expand from k0 in both directions
+    for direction in (+1, -1):
+        for s_step in range(max_steps):
+            # pick segment index j in this direction
+            if direction == +1:
+                j = (k0 + s_step) % M          # segment j: vertex j -> j+1
+            else:
+                j = (k0 - s_step - 1) % M      # segment j: vertex j -> j+1
+
+            A = np.array([Rw[j],   Zw[j]])
+            B = np.array([Rw[j+1], Zw[j+1]])
+
+            # foot on this segment (Wikipedia)
+            is_in, foot, dist, t_hat, s_along, L = _foot_on_segment_wiki(A, B, G, tol_interior, eps)
+
+            if not is_in:
+                # no interior perpendicular on this segment; keep expanding
+                continue
+
+            # two candidate normals (±90° to tangent)
+            Nl = np.array([-t_hat[1],  t_hat[0]])
+            Nr = np.array([ t_hat[1], -t_hat[0]])
+
+            # side test: exactly one side should be inside
+            in_l = wall_path.contains_point((foot[0] + probe*Nl[0], foot[1] + probe*Nl[1]), radius=bias)
+            in_r = wall_path.contains_point((foot[0] + probe*Nr[0], foot[1] + probe*Nr[1]), radius=bias)
+
+            if not in_l and not in_r:
+                # Neither side is inside => boundary no longer separates outside→inside here.
+                # Stop expanding in this direction.
+                break
+
+            if in_l == in_r:
+                # ambiguous (both inside or both outside due to corner/bias) -> skip this segment, continue expanding
+                continue
+
+            # choose inward normal; outward is the opposite
+            N_in  = Nl if in_l else Nr
+            N_in  = N_in / max(np.hypot(N_in[0], N_in[1]), eps)
+            N_out = -N_in
+
+            # (optional) ensure ghost is actually outside relative to this segment
+            s_out = np.dot(G - foot, N_out)
+            if s_out < 0:
+                # ghost appears inside relative to this local normal; skip but keep expanding
+                continue
+
+            # valid candidate — keep closest one
+            if (best is None) or (dist < best[0]):
+                best = (dist, j, foot, N_out)
+
+        # continue with the other direction
+
+    if best is not None:
+        dist, j_best, Pb, N_out = best
+        s = np.dot(G - Pb, N_out)
+        Pimg = G - 2.0 * s * N_out
+        return (Pb[0], Pb[1]), N_out, s, (Pimg[0], Pimg[1]), {
+            'kind': 'segment', 'segment_index': int(j_best), 'distance': float(dist)
+        }
+
+    # 3) fallback: nearest vertex with bisector normal
+    Pb = V[k0]
+    N_out = _vertex_bisector_normal(Rw, Zw, k0, G)
+    if np.dot(G - Pb, N_out) < 0.0:
+        N_out = -N_out
+    s = np.dot(G - Pb, N_out)
+    Pimg = G - 2.0 * s * N_out
+    return (Pb[0], Pb[1]), N_out, s, (Pimg[0], Pimg[1]), {
+        'kind': 'vertex', 'vertex_index': int(k0), 'note': 'no valid interior perpendicular found before stop'
+    }
+
 def _path_to_polyline(wall_path):
     """Extract (Rw,Zw) vertex arrays from a matplotlib Path (single closed polygon)."""
     verts = wall_path.vertices
@@ -176,6 +350,7 @@ def _path_to_polyline(wall_path):
     if codes is None:
         Rw, Zw = verts[:,0], verts[:,1]
     else:
+        #TODO: Paths seem to always be closed so just force check earlier on when making a path.
         mask = (codes != path.Path.CLOSEPOLY)
         Rw, Zw = verts[mask,0], verts[mask,1]
     return Rw, Zw
@@ -183,10 +358,10 @@ def _path_to_polyline(wall_path):
 def nearest_point_on_polyline(Rw, Zw, Rg, Zg, closed=True, eps=1e-14):
     """Return (seg_index, t, Rb, Zb) where (Rb,Zb) is closest point on polyline to (Rg,Zg)."""
     Rw = np.asarray(Rw); Zw = np.asarray(Zw)
-    if closed:
+    if closed: #TODO: This seems unnecessary? The last point is already the first if closed.
         Rv = np.r_[Rw, Rw[0]]; Zv = np.r_[Zw, Zw[0]]
     else:
-        Rv = Rw;             Zv = Zw
+        Rv = Rw; Zv = Zw
 
     A = np.column_stack([Rv[:-1], Zv[:-1]])     # (M,2)
     B = np.column_stack([Rv[1:],  Zv[1: ]])     # (M,2)
@@ -298,10 +473,16 @@ def ghost_mask(RR, ZZ, wall_path, connectivity=4, show=False, closed=True):
     touch = left_out | right_out | up_out | down_out
 
     if connectivity == 8:
-        ul_out = np.zeros_like(inside, bool);  ul_out[1:, 1:]  = outside[:-1, :-1]
-        ur_out = np.zeros_like(inside, bool);  ur_out[:-1,1:]  = outside[1:,  :-1]
-        dl_out = np.zeros_like(inside, bool);  dl_out[1:, :-1] = outside[:-1, 1: ]
-        dr_out = np.zeros_like(inside, bool);  dr_out[:-1,:-1] = outside[1:,   1: ]
+        ul_out = np.zeros_like(inside, bool)
+        ur_out = np.zeros_like(inside, bool)
+        dl_out = np.zeros_like(inside, bool)
+        dr_out = np.zeros_like(inside, bool)
+
+        ul_out[1:, 1:]  = outside[:-1, :-1]
+        ur_out[:-1,1:]  = outside[1:,  :-1]
+        dl_out[1:, :-1] = outside[:-1, 1: ]
+        dr_out[:-1,:-1] = outside[1:,   1: ]
+
         touch |= (ul_out | ur_out | dl_out | dr_out)
 
     in_mask = inside & touch
@@ -312,7 +493,10 @@ def ghost_mask(RR, ZZ, wall_path, connectivity=4, show=False, closed=True):
     Rb_list, Zb_list = [], []
     Rimg_list, Zimg_list = [], []
     for rgi, zgi in zip(Rg, Zg):
-        (Rb, Zb), N, s, (Rimg, Zimg), _ = reflect_ghost_across_wall(Rw, Zw, rgi, zgi, closed=closed)
+        #(Rb, Zb), N, s, (Rimg, Zimg), _ = reflect_ghost_across_wall(Rw, Zw, rgi, zgi, closed=closed)
+        (Rb, Zb), Nout, s, (Rimg, Zimg), info = reflect_ghost_across_wall_local_expand(
+            wall_path, rgi, zgi, tol_interior=0.0, probe=1e-6, bias=1e-12
+            )
         Rb_list.append(Rb);   Zb_list.append(Zb)
         Rimg_list.append(Rimg); Zimg_list.append(Zimg)
 
@@ -666,7 +850,7 @@ def main(args):
     #Read eqdsk file.
     gfile_dir = "/home/tirkas1/Workspace/TokData/"
     device = "DIIID" + "/"
-    #device = "TCV" + "/"
+    device = "TCV" + "/"
     gfile1 = "g162940.02944_670" #Old ql one.
     gfile2 = "g163241.03500" #Old DIIID one.
     #Ben's test cases for varying Ip and B0 directions.
@@ -676,7 +860,7 @@ def main(args):
     gfile6 = "g176312.03000"
     #TCV Case for simpler geometry.
     gfile7 = "65402_t1.eqdsk" #TODO: Need to make sure nr != nz is ok. TCV quite elongated.
-    gfilename = gfile1
+    gfilename = gfile7
     gfilepath = gfile_dir + device + gfilename
     print("Reading EQDSK file...")
     with open(gfilepath, "r", encoding="utf-8") as file:
@@ -715,7 +899,7 @@ def main(args):
 
     #Toroidal field component and q(psi).
     psi1D = np.linspace(paxis, pbdry, nrg)
-    #psi1D = np.linspace(pbdry, paxis, nrg) #TODO: For TCV it seems r is backwards??? Different cocos convention?
+    psi1D = np.linspace(pbdry, paxis, nrg) #TODO: For TCV it seems r is backwards??? Different cocos convention?
     #TODO: Why doesnt ext=0 work ok when tracing field?
     f_spl = interpolate.InterpolatedUnivariateSpline(psi1D, fpol, ext=3) #ext=3 uses boundary values outside range.
     q_spl = interpolate.InterpolatedUnivariateSpline(psi1D, qpsi, ext=3) #ext=0 uses extrapolation as with RectBivSpline on 2D but doesnt work in the integrator.
@@ -724,7 +908,7 @@ def main(args):
     #Generate simulation grid (lower res + guard cells)
     #TODO: Can pad in z as well in full FCI case, but wont matter if gfile large outside mask. Not sure BOUT handles Z padding?
     rpad, phipad, zpad = 2, 1, 2 #Padding/ghost cells on each end.
-    r_res, phi_res, z_res = 516, 64, 516
+    r_res, phi_res, z_res = 132, 64, 516
     nr, nphi, nz = r_res, 1, z_res
     phi_val = 0 #Take phi=0 to be starting point.
     dphi = 2*np.pi/phi_res
