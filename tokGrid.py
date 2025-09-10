@@ -214,34 +214,7 @@ def nearest_point_on_polyline(Rw, Zw, Rg, Zg):
     j = int(np.argmin(np.sum((perp)**2, axis=1)))
     return [float(perp[j,0]), float(perp[j,1])]
 
-def segment_unit_tangent(Rw, Zw, j):
-    d = np.array([Rw[j+1]-Rw[j], Zw[j+1]-Zw[j]])
-    L = np.hypot(d[0], d[1])
-    return d / L
-
-def segment_unit_normal_outward(T, Rb, Zb, Rg, Zg):
-    Nl = np.array([-T[1],  T[0]]); Nr = np.array([ T[1], -T[0]])
-    v  = np.array([Rg-Rb, Zg-Zb])  # boundary -> ghost
-    return Nl if np.dot(v, Nl) >= 0.0 else Nr
-
-def vertex_unit_normal(Rw, Zw, jv, Rg, Zg, eps=1e-14):
-    MU = len(Rw) - 1       # number of unique vertices (indices 0..MU-1)
-    jv = jv % MU           # coerce to unique-vertex range
-    j_prev = (jv - 1) % MU # previous segment index
-    j_curr = jv            # outgoing segment index
-
-    Tm = segment_unit_tangent(Rw, Zw, j_prev)
-    Tp = segment_unit_tangent(Rw, Zw, j_curr)
-    Nm = segment_unit_normal_outward(Tm, Rw[jv], Zw[jv], Rg, Zg)
-    Np = segment_unit_normal_outward(Tp, Rw[jv], Zw[jv], Rg, Zg)
-    N  = Nm + Np
-    L  = np.hypot(N[0], N[1])
-    if L < eps:
-        # straight corner: pick whichever points more toward ghost
-        return Nm if np.dot([Rg-Rw[jv], Zg-Zw[jv]], Nm) >= 0 else Np
-    return N / L
-
-def reflect_ghost_across_wall(Rw, Zw, Rg, Zg, eps=1e-14):
+def reflect_ghost_across_wall(Rw, Zw, Rg, Zg):
     """
     For ghost point Pg=(Rg,Zg): find nearest boundary point Pb, unit normal N (toward ghost),
     signed normal distance s, and reflected image point Pimg = Pg - 2 s N.
@@ -251,13 +224,8 @@ def reflect_ghost_across_wall(Rw, Zw, Rg, Zg, eps=1e-14):
     Rb, Zb = Rg + N[0], Zg + N[1]
     Rimg, Zimg = Rb + N[0], Zb + N[1]
 
-    #if 0.0 + eps < t < 1.0 - eps:
-    #    T = segment_unit_tangent(Rw, Zw, j)
-    #    N = segment_unit_normal_outward(T, Rb, Zb, Rg, Zg)
-    #else:
-    #   jv = (j + (t >= 1.0 - eps)) % len(Rw)
-    #    N  = vertex_unit_normal(Rw, Zw, jv, Rg, Zg, eps)
-    #s = np.dot([Rg-Rb, Zg-Zb], [perpx,perpz])
+    #TODO: For endpoints(vertices), use bisector method to calculate image point.
+    #TODO: If image point outside wall, divide distance by 2 until inside.
 
     return (Rb, Zb), (Rimg, Zimg)
 
@@ -314,7 +282,7 @@ def handle_bounds(RR, ZZ, wall_path, show=False):
 
     Rb_list, Zb_list = [], []
     Rimg_list, Zimg_list = [], []
-    Rw, Zw = np.append(Rw, Rw[0]), np.append(Zw, Zw[0])
+    Rw, Zw = np.append(Rw, Rw[0]), np.append(Zw, Zw[0]) #TODO: Why do I need to add last point again? Or final segment missing...
     for rgi, zgi in zip(Rg, Zg):
         (Rb, Zb), (Rimg, Zimg) = reflect_ghost_across_wall(Rw, Zw, rgi, zgi)
         Rb_list.append(Rb);     Zb_list.append(Zb)
