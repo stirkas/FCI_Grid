@@ -18,6 +18,18 @@ from hypnotoad.utils.critical import find_critical as fc
 
 #TODO:Add unit tests to make sure functionality is reasonable? Convert to classes with type hints, type checks, and header comments?
 
+#Colored output, works for linux...
+YELLOW = "\033[33m"
+RED    = "\033[31m"
+BLUE   = "\033[94m"
+RESET  = "\033[0m"
+def info(message):
+    print(BLUE + "INFO: " + message + RESET)
+def warn(message):
+    print(YELLOW + "WARNING: " + message + RESET)
+def error(message):
+    print(RED + "ERROR: " + message + RESET)
+
 def calc_vol(Rc, Jp, dx=1.0, dz=1.0):
     """
     Per-radian control volume A_R at centers from radius Rc and poloidal Jacobian Jp.
@@ -171,17 +183,36 @@ def path_to_polyline(wall_path):
     return Rw, Zw
 
 def nearest_point_on_polyline(Rw, Zw, Rg, Zg):
-    """Return (seg_index, t, Rb, Zb) where (Rb,Zb) is closest point on polyline to (Rg,Zg)."""
-    A = np.column_stack([Rw[:-1], Zw[:-1]])     # (M,2)
-    B = np.column_stack([Rw[1:],  Zw[1: ]])     # (M,2)
-    d = B - A                                   # segment vectors
-    v = np.array([Rg, Zg]) - A                  # A -> P
-
+    """Return (seg_index, t, Rb, Zb) where (Rb,Zb) is closest point on polyline to (Rg,Zg).
+        
+    Vector formulation from wiki page "Distance from a point to a line". See image there for illustration.
+    Assuming eqn of line is x = a + tn for t in [0,1]:
+    (a-p)                  #Vector from point to line start.
+    (a-p) dot n            #Projection of a-p onto line 
+    (a-p) - ((a-p) dot n)n #Component of a-p perp to line!
+    """
+    #Get segment vectors and vector to starts from ghost points.
+    a = np.column_stack([Rw[:-1], Zw[:-1]]) #Segment start points
+    b = np.column_stack([Rw[1:],  Zw[1: ]]) #Segment end points
+    g = np.array([Rg, Zg])                  #Ghost points
+    d = b - a                               #Segment vectors
     dd = np.sum(d*d, axis=1)
-    t  = np.clip(np.sum(v*d, axis=1) / dd, 0.0, 1.0)
-    P  = A + t[:,None]*d
-    j  = int(np.argmin(np.sum((P - np.array([Rg,Zg]))**2, axis=1)))
-    return j, float(t[j]), P[j,0], P[j,1]
+    l  = np.sqrt(dd)
+    n = d/l[:,None]                         #Segment unit vectors
+
+    ga = a - g                  #Ghost point to seg start vectors
+    proj = np.sum(ga*n, axis=1) #Projection of vector along n.
+    perp = ga - proj[:, None]*n #Perp vector to add to g to get to intersection.
+
+    #Clamp point on line to endpoints. t = length along ab.
+    t_raw = np.sum(((g + perp - a)*d), axis=1)/dd
+    before_cond = (t_raw < 0.0)[:,None]
+    after_cond  = (t_raw > 1.0)[:,None]
+    perp  = np.select([before_cond, after_cond],[a - g, b - g],default=perp)
+
+    # pick nearest segment
+    j = int(np.argmin(np.sum((perp)**2, axis=1)))
+    return [float(perp[j,0]), float(perp[j,1])]
 
 def segment_unit_tangent(Rw, Zw, j):
     d = np.array([Rw[j+1]-Rw[j], Zw[j+1]-Zw[j]])
@@ -216,16 +247,19 @@ def reflect_ghost_across_wall(Rw, Zw, Rg, Zg, eps=1e-14):
     signed normal distance s, and reflected image point Pimg = Pg - 2 s N.
     Returns: (Rb,Zb), N (len-2), s, (Rimg,Zimg), (seg_index, t)
     """
-    j, t, Rb, Zb = nearest_point_on_polyline(Rw, Zw, Rg, Zg)
-    if 0.0 + eps < t < 1.0 - eps:
-        T = segment_unit_tangent(Rw, Zw, j)
-        N = segment_unit_normal_outward(T, Rb, Zb, Rg, Zg)
-    else:
-        jv = (j + (t >= 1.0 - eps)) % len(Rw)
-        N  = vertex_unit_normal(Rw, Zw, jv, Rg, Zg, eps)
-    s = np.dot([Rg-Rb, Zg-Zb], N)
-    Rimg, Zimg = Rg - 2.0*s*N[0], Zg - 2.0*s*N[1]
-    return (Rb, Zb), N, s, (Rimg, Zimg), (j, t)
+    N = nearest_point_on_polyline(Rw, Zw, Rg, Zg) #Returns normal vector to bdy.
+    Rb, Zb = Rg + N[0], Zg + N[1]
+    Rimg, Zimg = Rb + N[0], Zb + N[1]
+
+    #if 0.0 + eps < t < 1.0 - eps:
+    #    T = segment_unit_tangent(Rw, Zw, j)
+    #    N = segment_unit_normal_outward(T, Rb, Zb, Rg, Zg)
+    #else:
+    #   jv = (j + (t >= 1.0 - eps)) % len(Rw)
+    #    N  = vertex_unit_normal(Rw, Zw, jv, Rg, Zg, eps)
+    #s = np.dot([Rg-Rb, Zg-Zb], [perpx,perpz])
+
+    return (Rb, Zb), (Rimg, Zimg)
 
 def get_neighbor_mask(point_mask, connectivity=4):
     """
@@ -260,9 +294,9 @@ def get_neighbor_mask(point_mask, connectivity=4):
 
     return neighbor_any
 
-def ghost_mask(RR, ZZ, wall_path, show=False):
+def handle_bounds(RR, ZZ, wall_path, show=False):
     """
-    Generate ghost mask and boundary conditions. #TODO: Rename function? Or split up.
+    Generate ghost mask and boundary conditions.
     """
     pts = np.column_stack([RR.ravel(), ZZ.ravel()])
     inside = wall_path.contains_points(pts, radius=1e-12) #Note: Bias points on edge as 1e-12 inside when radius positive...
@@ -280,9 +314,10 @@ def ghost_mask(RR, ZZ, wall_path, show=False):
 
     Rb_list, Zb_list = [], []
     Rimg_list, Zimg_list = [], []
+    Rw, Zw = np.append(Rw, Rw[0]), np.append(Zw, Zw[0])
     for rgi, zgi in zip(Rg, Zg):
-        (Rb, Zb), N, s, (Rimg, Zimg), _ = reflect_ghost_across_wall(Rw, Zw, rgi, zgi)
-        Rb_list.append(Rb);   Zb_list.append(Zb)
+        (Rb, Zb), (Rimg, Zimg) = reflect_ghost_across_wall(Rw, Zw, rgi, zgi)
+        Rb_list.append(Rb);     Zb_list.append(Zb)
         Rimg_list.append(Rimg); Zimg_list.append(Zimg)
 
     if show:
@@ -292,10 +327,11 @@ def ghost_mask(RR, ZZ, wall_path, show=False):
 
         # ghost (green) and boundary-inside (blue)
         ax.scatter(RR[ghost_mask], ZZ[ghost_mask], s=16, c='g',   marker='o', label='ghost')
-        ax.scatter(RR[in_mask],    ZZ[in_mask],    s=16, c='blue',marker='o', label='inner')
+        #ax.scatter(RR[in_mask],    ZZ[in_mask],    s=16, c='blue',marker='o', label='inner')
 
         # image points (red)
-        ax.scatter(Rimg_list, Zimg_list, s=20, c='red', marker='o', label='image')
+        ax.scatter(Rimg_list, Zimg_list, s=20, c='red',  marker='o', label='image')
+        ax.scatter(Rb_list,   Zb_list,   s=20, c='blue', marker='o', label='bdy')
 
         # red intercept lines: ghost → boundary intercept
         for rgi, zgi, rbi, zbi, rimi, zimi in zip(Rg, Zg, Rb_list, Zb_list, Rimg_list, Zimg_list):
@@ -310,10 +346,8 @@ def ghost_mask(RR, ZZ, wall_path, show=False):
 
 DEFAULT_PATH_ABS_TOL = 0.0
 def make_path(rpts, zpts, abs_tol=DEFAULT_PATH_ABS_TOL):
-    print("Generating closed polyline path...")
-
     if abs_tol == DEFAULT_PATH_ABS_TOL:
-        print("WARNING: Constructing path with tol of " + str(DEFAULT_PATH_ABS_TOL) + ". This seems generally ok for gfiles.")
+        warn("Constructing path with tol of " + str(DEFAULT_PATH_ABS_TOL) + ". This seems generally ok for gfiles.")
 
     if rpts.shape != zpts.shape or rpts.size < 3:
         raise ValueError("Need matching R,Z arrays with ≥4 points (a closed triangle at minimum).")
@@ -321,20 +355,21 @@ def make_path(rpts, zpts, abs_tol=DEFAULT_PATH_ABS_TOL):
     #Exact-closure check by default.
     end_gap = float(np.hypot(rpts[-1]-rpts[0], zpts[-1]-zpts[0]))
     if (end_gap > abs_tol):
-        print("WARNING: First and last wall points not exactly equal within tol: " + str(abs_tol) + ". " \
+        warn("First and last wall points not exactly equal within tol: " + str(abs_tol) + ". " \
             + "Forcing wall closure at final point (" + str(rpts[0]) + ", " + str(zpts[0]) + "), double check wall looks closed correctly.")
         rpts = np.append(rpts, rpts[0])
         zpts = np.append(zpts, zpts[0])
 
     #Remove segments with zero length, but keep final segment which wraps around to beginning.
     keep = np.concatenate([(np.abs(np.diff(rpts)) > abs_tol) | (np.abs(np.diff(zpts)) > abs_tol), np.array([True])])
+    rpts, zpts = rpts[keep], zpts[keep]
     #Also remove unnecessary segments (middle segments along a vert/horz line).
     #TODO: Update for sloped lines? Would require using tolerance on angles...
     drop_mid_r = (np.abs(np.diff(rpts[:-1])) <= abs_tol) & (np.abs(np.diff(rpts[1:])) <= abs_tol)
     drop_mid_z = (np.abs(np.diff(zpts[:-1])) <= abs_tol) & (np.abs(np.diff(zpts[1:])) <= abs_tol)
-    drop_mid_r = np.concatenate([np.array([False]), drop_mid_r, np.array([False])])
-    drop_mid_z = np.concatenate([np.array([False]), drop_mid_z, np.array([False])])
-    keep &= ~(drop_mid_r | drop_mid_z)
+    drop_mid   = drop_mid_r | drop_mid_z
+    drop_mid   = np.concatenate([np.array([False]), drop_mid, np.array([False])])
+    keep       = ~drop_mid
     rpts, zpts = rpts[keep], zpts[keep]
 
     #Build a Path with explicit CLOSEPOLY...i.e. tell Path() class it is explicitly closed.
@@ -346,7 +381,7 @@ def make_path(rpts, zpts, abs_tol=DEFAULT_PATH_ABS_TOL):
 
     wall_path = path.Path(verts, codes)
 
-    return wall_path
+    return wall_path, rpts, zpts
 
 def setup_field_line_interpolation(R_grid, Z_grid, dRdphi, dZdphi, linear=0):
     """
@@ -565,7 +600,7 @@ def get_metric(R, Z, nx, nz, dx, dz):
         #"J": JB,
     }
 
-def findIndex(R, Z, Rmin, Zmin, dR, dZ, rbdy, zbdy, show=False):
+def findIndex(R, Z, Rmin, Zmin, dR, dZ, bdry, show=False):
     """Finds the (x,z) index corresponding to the given (R,Z) coordinate
 
     Parameters
@@ -595,9 +630,8 @@ def findIndex(R, Z, Rmin, Zmin, dR, dZ, rbdy, zbdy, show=False):
     # domains.
 
     #Mask out points around boundary.
-    bdy_path = make_path(rbdy, zbdy)
     pts = np.column_stack([R.ravel(), Z.ravel()])
-    inside = bdy_path.contains_points(pts, radius=1e-12) #Note: Bias points on edge as 1e-12 inside when radius positive...
+    inside = bdry.contains_points(pts, radius=1e-12) #Note: Bias points on edge as 1e-12 inside when radius positive...
     inside = inside.reshape((R.shape[0], R.shape[1]))
 
     nrp, nzp = len(R), len(Z)
@@ -608,12 +642,12 @@ def findIndex(R, Z, Rmin, Zmin, dR, dZ, rbdy, zbdy, show=False):
         fig, ax = plt.subplots(figsize=(6,6))
 
         # 1) draw the wall Path itself
-        patch = PathPatch(bdy_path, facecolor='none', edgecolor='k', lw=2)
+        patch = PathPatch(bdry, facecolor='none', edgecolor='k', lw=2)
         ax.add_patch(patch)
 
         # 2) scatter the points inside (green) and outside (red)
         ax.scatter(
-            R[ inside], Z[ inside],
+            R[inside], Z[inside],
             s=10, c='g', marker='o', label='inside', alpha=0.6
         )
         ax.scatter(
@@ -674,7 +708,7 @@ def main(args):
     #Read eqdsk file.
     gfile_dir = "/home/tirkas1/Workspace/TokData/"
     device = "DIIID" + "/"
-    device = "TCV" + "/"
+    #device = "TCV" + "/"
     gfile1 = "g162940.02944_670" #Old ql one.
     gfile2 = "g163241.03500" #Old DIIID one.
     #Ben's test cases for varying Ip and B0 directions.
@@ -684,7 +718,7 @@ def main(args):
     gfile6 = "g176312.03000"
     #TCV Case for simpler geometry.
     gfile7 = "65402_t1.eqdsk" #TODO: Need to make sure nr != nz is ok. TCV quite elongated.
-    gfilename = gfile7
+    gfilename = gfile1
     gfilepath = gfile_dir + device + gfilename
     print("Reading EQDSK file...")
     with open(gfilepath, "r", encoding="utf-8") as file:
@@ -693,7 +727,7 @@ def main(args):
 
     nrg, nzg = gfile["nx"], gfile["ny"]
     rmin, rmax = gfile["rleft"], gfile["rleft"] + gfile["rdim"]
-    zmin, zmax = gfile["zmid"] - 0.5 * gfile["zdim"], gfile["zmid"] + 0.5 * gfile["zdim"]
+    zmin, zmax = gfile["zmid"] - 0.5*gfile["zdim"], gfile["zmid"] + 0.5*gfile["zdim"]
     Rg = np.linspace(rmin, rmax, nrg)
     Zg = np.linspace(zmin, zmax, nzg)
 
@@ -723,7 +757,7 @@ def main(args):
 
     #Toroidal field component and q(psi).
     psi1D = np.linspace(paxis, pbdry, nrg)
-    psi1D = np.linspace(pbdry, paxis, nrg) #TODO: For TCV it seems r is backwards??? Different cocos convention?
+    #psi1D = np.linspace(pbdry, paxis, nrg) #TODO: For TCV it seems r is backwards??? Different cocos convention?
     #TODO: Why doesnt ext=0 work ok when tracing field?
     f_spl = interpolate.InterpolatedUnivariateSpline(psi1D, fpol, ext=3) #ext=3 uses boundary values outside range.
     q_spl = interpolate.InterpolatedUnivariateSpline(psi1D, qpsi, ext=3) #ext=0 uses extrapolation as with RectBivSpline on 2D but doesnt work in the integrator.
@@ -737,7 +771,9 @@ def main(args):
     phi_val = 0 #Take phi=0 to be starting point.
     dphi = 2*np.pi/phi_res
     phi_arr = [dphi]
-    METRIC_2D = True #Note 2D technically means size one in toroidal dim and run BOUT with BOUT_ENABLE_METRIC_3D on. Will need 3D for turbulence sims.
+    METRIC_2D = True #Note 2D technically means size one in toroidal dim and run BOUT with BOUT_ENABLE_METRIC_3D on. Will need full 3D for turbulence sims.
+    metric_info = "Generating one poloidal plane in 3D." if METRIC_2D == True else "Extending info to multiple poloidal planes in 3D."
+    info(metric_info)
     if not METRIC_2D:
         phi_arr = np.linspace(phi_val, 2*np.pi, nphi, endpoint=False) #Periodic so dont go all the way.
         dphi = phi_arr[1]-phi_arr[0]
@@ -767,8 +803,8 @@ def main(args):
 
     #Compute derivatives along phi NOT B_phi. So need to pass field line direction when following below.
     #R factor comes from cylindrical geometry.
-    dRdphi = RR * Bp_R / Bphi
-    dZdphi = RR * Bp_Z / Bphi
+    dRdphi = RR*Bp_R/Bphi
+    dZdphi = RR*Bp_Z/Bphi
 
     #Set up interpolation
     print("Setting up interpolation...")
@@ -786,7 +822,8 @@ def main(args):
     #R1, Z1 = rbdy[sep_idx], zbdy[sep_idx] #Separatrix
 
     #Grab wall points to test points in domain.
-    wall_path = make_path(rlmt,zlmt)
+    print("Generating wall boundary path...")
+    wall_path, rlmt2, zlmt2 = make_path(rlmt,zlmt)
 
     R2D, Z2D = np.meshgrid(Rg, Zg, indexing="ij")
     sep_atol, sep_maxits = 1e-5, 1000 #Store default settings from hypnotoad examples.
@@ -827,9 +864,9 @@ def main(args):
         bwdPts[idx, 0], bwdPts[idx, 1] = sln.y[0, -1], sln.y[1, -1]
 
     #Generate ghost point mask and BC information.
-    #TODO: Add parallel BCs as well based on tracing points from above.
+    #TODO: Add parallel BCs as well based on traced points from above.
     print("Generating ghost cells and boundary conditions...")
-    ghosts = ghost_mask(RR, ZZ, wall_path, show=True)
+    ghosts = handle_bounds(RR, ZZ, wall_path, show=True)
 
     #Convert mapping points back to 2d arrays.
     Rfwd = fwdPts[:,0].reshape(nrp, nzp)
@@ -856,8 +893,8 @@ def main(args):
     }
     #Need to do this all in 3D now, didn't need the complication before.
     R3, phi3, Z3 = np.meshgrid(R, phi_arr, Z, indexing='ij')
-    fwd_xtp, fwd_ztp = findIndex(Rfwd, Zfwd, R[0], Z[0], R[1]-R[0], Z[1]-Z[0], rlmt, zlmt, show=True)
-    bwd_xtp, bwd_ztp = findIndex(Rbwd, Zbwd, R[0], Z[0], R[1]-R[0], Z[1]-Z[0], rlmt, zlmt, show=True)
+    fwd_xtp, fwd_ztp = findIndex(Rfwd, Zfwd, R[0], Z[0], dR, dZ, wall_path, show=True)
+    bwd_xtp, bwd_ztp = findIndex(Rbwd, Zbwd, R[0], Z[0], dR, dZ, wall_path, show=True)
 
     maps = {
         "R": R3,
@@ -920,16 +957,13 @@ def main(args):
         "backward_g_33": make_3d(bwd_metric["g_zz"], nphi)
     }
     #Update gyy's with field line following factors for parallel operators, since this is handled along field lines.
-    metric.update({k: v/parFac**2 for k, v in metric.items() if k in ("g22", "forward_g22", "backward_g22")})
-    metric.update({k: v*parFac**2 for k, v in metric.items() if k in ("g_22", "forward_g_22", "backward_g_22")})
+    metric.update({k: v/parFac**2 for k,v in metric.items() if k in ("g22", "forward_g22", "backward_g22")})
+    metric.update({k: v*parFac**2 for k,v in metric.items() if k in ("g_22", "forward_g_22", "backward_g_22")})
 
     #Generate finite volume operators following zoidberg stencil code.
     #Jacobian assuming gxz = gzx.
     jac = np.sqrt(ctr_metric["g_xx"]*ctr_metric["g_zz"]-ctr_metric["g_xz"]**2)
     dagp_fv_volume = calc_vol(RR, jac, dr, dz)
-    #TODO Recalculate face metric and face R,Z from splines, like stencil code does.
-    #Note: I think this means use the same x,z -> R,Z spline, but with x,z +/- 0.5?
-    #This doesnt necessarily mean halfway between Rs and Zs does it? Well my ways match for rect grid...
     faces = face_metrics_from_centers(ctr_metric["gxx"], ctr_metric["gxz"], ctr_metric["gzz"],
                                       ctr_metric["g_xx"], ctr_metric["g_xz"], ctr_metric["g_zz"],)
     fac_XX, fac_XZ, fac_ZZ, fac_ZX = fac_per_area_from_faces(faces, dr, dz)
@@ -1003,7 +1037,7 @@ def main(args):
     plotting = True
     checkPts = True
     if (plotting):
-        plot(R, Z, psi, ghost, rbdy, zbdy, rlmt, zlmt,
+        plot(R, Z, psi, ghost, rbdy, zbdy, rlmt2, zlmt2,
             sign_b0, Rvals_pos, Zvals_pos, Rvals_neg, Zvals_neg,
             opoints, xpoints, checkPts, gridPtsFinal, fwdPtsFinal, bwdPtsFinal)
 
