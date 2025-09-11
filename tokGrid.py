@@ -172,17 +172,33 @@ def make_3d(arr_2d: np.ndarray, ny: int) -> np.ndarray:
 
     return np.repeat(arr_2d[:, np.newaxis, :], ny, axis=1)
 
-def path_to_polyline(wall_path):
-    """Extract (Rw,Zw) vertex arrays from a matplotlib Path (single closed polygon)."""
-    verts = wall_path.vertices
-    codes = wall_path.codes
+def length(v):
+    return np.sqrt(np.dot(v,v))
 
-    mask = (codes != path.Path.CLOSEPOLY)
-    Rw, Zw = verts[mask,0], verts[mask,1]
+def unit(v):
+    return v/length(v)
 
-    return Rw, Zw
+def vertex_bisector(R, Z, Rb, Zb, wall_path, j):
+    #Wrap around for last index.
+    if j == len(R)-1: j = 0
 
-def nearest_point_on_polyline(Rw, Zw, Rg, Zg):
+    # edge tangents (into and out of the vertex)
+    Tm = unit([R[j]  - R[j-1], Z[j]  - Z[j-1]])
+    Tp = unit([R[j+1] - R[j],  Z[j+1] - Z[j]])
+
+    #Reverse first segment and treat vertex as origin.
+    #Sum unit vectors to get bisector.
+    B = -Tm + Tp
+    Bu = unit(B)
+
+    #Need to deal with concave vs convex vertex.
+    #Use tiny segment to test correctly inside since full value could lie outside if passing another wall.
+    if not wall_path.contains_point((Rb + PATH_TOL*Bu[0], Zb + PATH_TOL*Bu[1])):
+        Bu = -Bu
+
+    return Bu
+
+def nearest_point_on_path(Rw, Zw, Rg, Zg):
     """Return (seg_index, t, Rb, Zb) where (Rb,Zb) is closest point on polyline to (Rg,Zg).
         
     Vector formulation from wiki page "Distance from a point to a line". See image there for illustration.
@@ -197,7 +213,7 @@ def nearest_point_on_polyline(Rw, Zw, Rg, Zg):
     g = np.array([Rg, Zg])                  #Ghost points
     d = b - a                               #Segment vectors
     dd = np.sum(d*d, axis=1)
-    l  = np.sqrt(dd)
+    l  = np.sqrt(dd) #TODO: Use length functions? Handle vectors consistently...
     n = d/l[:,None]                         #Segment unit vectors
 
     ga = a - g                  #Ghost point to seg start vectors
@@ -208,24 +224,40 @@ def nearest_point_on_polyline(Rw, Zw, Rg, Zg):
     t_raw = np.sum(((g + perp - a)*d), axis=1)/dd
     before_cond = (t_raw < 0.0)[:,None]
     after_cond  = (t_raw > 1.0)[:,None]
-    perp  = np.select([before_cond, after_cond],[a - g, b - g],default=perp)
+    perp  = np.select([before_cond, after_cond], [a - g, b - g], default=perp)
 
     # pick nearest segment
     j = int(np.argmin(np.sum((perp)**2, axis=1)))
-    return [float(perp[j,0]), float(perp[j,1])]
 
-def reflect_ghost_across_wall(Rw, Zw, Rg, Zg):
-    """
-    For ghost point Pg=(Rg,Zg): find nearest boundary point Pb, unit normal N (toward ghost),
-    signed normal distance s, and reflected image point Pimg = Pg - 2 s N.
-    Returns: (Rb,Zb), N (len-2), s, (Rimg,Zimg), (seg_index, t)
-    """
-    N = nearest_point_on_polyline(Rw, Zw, Rg, Zg) #Returns normal vector to bdy.
-    Rb, Zb = Rg + N[0], Zg + N[1]
-    Rimg, Zimg = Rb + N[0], Zb + N[1]
+    return j, t_raw[j], [float(perp[j,0]), float(perp[j,1])]
 
-    #TODO: For endpoints(vertices), use bisector method to calculate image point.
-    #TODO: If image point outside wall, divide distance by 2 until inside.
+def reflect_ghost_across_wall(wall_path, Rg, Zg):
+    #Get wall points.
+    Rw, Zw = wall_path.vertices[:,0], wall_path.vertices[:,1]
+    #Get info about intersection point. Segment index, location along segment,
+    #and normal vector from ghost to boundary.
+    idx_b, loc_b, N_b = nearest_point_on_path(Rw, Zw, Rg, Zg)
+    Rb, Zb = Rg + N_b[0], Zg + N_b[1]
+
+    #If boundary point is an endpoint, follow bisection angle.
+    if (loc_b <= 0.0) or (loc_b >= 1.0):
+        print("Calculating bisection vector.")
+        print(Rg, Zg)
+        if loc_b >= 1.0:
+            idx_b += 1
+        bsct = vertex_bisector(Rw, Zw, Rb, Zb, wall_path, idx_b)
+        #Overwrite N_b with bisector.
+        N_len = np.sqrt(N_b[0]**2 + N_b[1]**2)
+        N_b[0], N_b[1] = N_len*bsct[0], N_len*bsct[1]
+
+    #Lastly, if image point is outside, divide extra length in half successively.
+    #TODO: Find second intercept and go halfway between two boundaries?
+    Rimg, Zimg = Rb + N_b[0], Zb + N_b[1]
+    while not wall_path.contains_points([[Rimg, Zimg]], radius=PATH_EDGE_IN_BIAS):
+        print("Moving outer image point back in.")
+        print(Rg, Zg)
+        Rout,  Zout = Rimg - Rb, Zimg - Zb
+        Rimg, Zimg  = Rb + Rout/2, Zb + Zout/2
 
     return (Rb, Zb), (Rimg, Zimg)
 
@@ -267,7 +299,7 @@ def handle_bounds(RR, ZZ, wall_path, show=False):
     Generate ghost mask and boundary conditions.
     """
     pts = np.column_stack([RR.ravel(), ZZ.ravel()])
-    inside = wall_path.contains_points(pts, radius=1e-12) #Note: Bias points on edge as 1e-12 inside when radius positive...
+    inside = wall_path.contains_points(pts, radius=PATH_EDGE_IN_BIAS)
     inside = inside.reshape(RR.shape)
     neigbors_in = get_neighbor_mask(inside)
     ghost_mask = (~inside) & neigbors_in
@@ -277,14 +309,13 @@ def handle_bounds(RR, ZZ, wall_path, show=False):
     neighbors_out = get_neighbor_mask(outside)
     in_mask = inside & neighbors_out
 
-    Rw, Zw = path_to_polyline(wall_path)
-    Rg = RR[ghost_mask]; Zg = ZZ[ghost_mask]
-
-    Rb_list, Zb_list = [], []
+    #Get image points from ghost cells and wall points.
+    Rg = RR[ghost_mask]
+    Zg = ZZ[ghost_mask]
+    Rb_list,   Zb_list   = [], []
     Rimg_list, Zimg_list = [], []
-    Rw, Zw = np.append(Rw, Rw[0]), np.append(Zw, Zw[0]) #TODO: Why do I need to add last point again? Or final segment missing...
     for rgi, zgi in zip(Rg, Zg):
-        (Rb, Zb), (Rimg, Zimg) = reflect_ghost_across_wall(Rw, Zw, rgi, zgi)
+        (Rb, Zb), (Rimg, Zimg) = reflect_ghost_across_wall(wall_path, rgi, zgi)
         Rb_list.append(Rb);     Zb_list.append(Zb)
         Rimg_list.append(Rimg); Zimg_list.append(Zimg)
 
@@ -295,44 +326,52 @@ def handle_bounds(RR, ZZ, wall_path, show=False):
 
         # ghost (green) and boundary-inside (blue)
         ax.scatter(RR[ghost_mask], ZZ[ghost_mask], s=16, c='g',   marker='o', label='ghost')
-        #ax.scatter(RR[in_mask],    ZZ[in_mask],    s=16, c='blue',marker='o', label='inner')
+        ax.scatter(RR[in_mask],    ZZ[in_mask],    s=16, c='blue',marker='o', label='inner')
 
         # image points (red)
-        ax.scatter(Rimg_list, Zimg_list, s=20, c='red',  marker='o', label='image')
-        ax.scatter(Rb_list,   Zb_list,   s=20, c='blue', marker='o', label='bdy')
+        ax.scatter(Rimg_list, Zimg_list, s=20, c='red', marker='o', label='image')
 
         # red intercept lines: ghost → boundary intercept
         for rgi, zgi, rbi, zbi, rimi, zimi in zip(Rg, Zg, Rb_list, Zb_list, Rimg_list, Zimg_list):
             ax.plot([rgi, rbi, rimi], [zgi, zbi, zimi], 'r-', lw=2, alpha=0.6)
 
         ax.set_aspect('equal', 'box')
-        ax.set_xlabel('R'); ax.set_ylabel('Z')
+        ax.set_xlabel('R')
+        ax.set_ylabel('Z')
         ax.legend(loc='best')
-        plt.tight_layout(); plt.show()
+        plt.tight_layout()
+        plt.show()
 
     return ghost_mask
 
-DEFAULT_PATH_ABS_TOL = 0.0
-def make_path(rpts, zpts, abs_tol=DEFAULT_PATH_ABS_TOL):
-    if abs_tol == DEFAULT_PATH_ABS_TOL:
-        warn("Constructing path with tol of " + str(DEFAULT_PATH_ABS_TOL) + ". This seems generally ok for gfiles.")
+CLOSED_PATH_TOL   =  0.0
+PATH_TOL          =  1e-12
+PATH_EDGE_IN_BIAS = -PATH_TOL #Use to bias points on wall to inside.
+PATH_ANGLE_TOL    =  1e-12
+def make_path(rpts, zpts, abs_tol=CLOSED_PATH_TOL):
+    if abs_tol == CLOSED_PATH_TOL:
+        warn("Constructing closed path with tol of " + str(CLOSED_PATH_TOL) + \
+              ". This seems generally ok for gfiles.")
 
     if rpts.shape != zpts.shape or rpts.size < 3:
-        raise ValueError("Need matching R,Z arrays with ≥4 points (a closed triangle at minimum).")
+        raise ValueError("Need matching size R,Z arrays with ≥4 points (a closed triangle at minimum).")
 
     #Exact-closure check by default.
     end_gap = float(np.hypot(rpts[-1]-rpts[0], zpts[-1]-zpts[0]))
     if (end_gap > abs_tol):
         warn("First and last wall points not exactly equal within tol: " + str(abs_tol) + ". " \
-            + "Forcing wall closure at final point (" + str(rpts[0]) + ", " + str(zpts[0]) + "), double check wall looks closed correctly.")
+            + "Forcing wall closure at final point (" + str(rpts[0]) + ", " + str(zpts[0]) + "),\
+              double check wall looks closed correctly.")
         rpts = np.append(rpts, rpts[0])
         zpts = np.append(zpts, zpts[0])
 
     #Remove segments with zero length, but keep final segment which wraps around to beginning.
-    keep = np.concatenate([(np.abs(np.diff(rpts)) > abs_tol) | (np.abs(np.diff(zpts)) > abs_tol), np.array([True])])
+    r_zero = np.abs(np.diff(rpts)) > abs_tol
+    z_zero = np.abs(np.diff(zpts)) > abs_tol
+    keep = np.concatenate([(r_zero | z_zero), np.array([True])])
     rpts, zpts = rpts[keep], zpts[keep]
     #Also remove unnecessary segments (middle segments along a vert/horz line).
-    #TODO: Update for sloped lines? Would require using tolerance on angles...
+    #TODO: Update for angled lines, not just horz/vert? Use PATH_ANGLE_TOL for colinear check?
     drop_mid_r = (np.abs(np.diff(rpts[:-1])) <= abs_tol) & (np.abs(np.diff(rpts[1:])) <= abs_tol)
     drop_mid_z = (np.abs(np.diff(zpts[:-1])) <= abs_tol) & (np.abs(np.diff(zpts[1:])) <= abs_tol)
     drop_mid   = drop_mid_r | drop_mid_z
@@ -599,7 +638,7 @@ def findIndex(R, Z, Rmin, Zmin, dR, dZ, bdry, show=False):
 
     #Mask out points around boundary.
     pts = np.column_stack([R.ravel(), Z.ravel()])
-    inside = bdry.contains_points(pts, radius=1e-12) #Note: Bias points on edge as 1e-12 inside when radius positive...
+    inside = bdry.contains_points(pts, radius=PATH_EDGE_IN_BIAS)
     inside = inside.reshape((R.shape[0], R.shape[1]))
 
     nrp, nzp = len(R), len(Z)
@@ -734,13 +773,15 @@ def main(args):
     #Generate simulation grid (lower res + guard cells)
     #TODO: Can pad in z as well in full FCI case, but wont matter if gfile large outside mask. But Z periodic in BOUT...
     rpad, phipad, zpad = 2, 1, 2 #Padding/ghost cells on each end.
-    r_res, phi_res, z_res = 68, 64, 68
+    r_res, phi_res, z_res = 64, 64, 64
     nr, nphi, nz = r_res, 1, z_res
     phi_val = 0 #Take phi=0 to be starting point.
     dphi = 2*np.pi/phi_res
     phi_arr = [dphi]
-    METRIC_2D = True #Note 2D technically means size one in toroidal dim and run BOUT with BOUT_ENABLE_METRIC_3D on. Will need full 3D for turbulence sims.
-    metric_info = "Generating one poloidal plane in 3D." if METRIC_2D == True else "Extending info to multiple poloidal planes in 3D."
+    #Note, 2d really means 3d with len(phi) == 1. Use full 3d for turbulence sims.
+    METRIC_2D = True
+    metric_info = "Generating one poloidal plane in 3D." if METRIC_2D == True \
+             else "Extending info to multiple poloidal planes in 3D."
     info(metric_info)
     if not METRIC_2D:
         phi_arr = np.linspace(phi_val, 2*np.pi, nphi, endpoint=False) #Periodic so dont go all the way.
