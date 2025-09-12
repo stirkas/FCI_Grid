@@ -179,20 +179,23 @@ def unit(v):
     return v/length(v)
 
 def vertex_bisector(R, Z, Rb, Zb, wall_path, j):
-    #Wrap around for last index.
-    if j == len(R)-1: j = 0
+    #Need to ignore final (closure) point when considering last vertex.
+    #Note j here is the segment index.
+    wrap = lambda i: i % (len(R)-1)
+    jm = wrap(j-1)
+    jp = wrap(j+1)
 
     # edge tangents (into and out of the vertex)
-    Tm = unit([R[j]  - R[j-1], Z[j]  - Z[j-1]])
-    Tp = unit([R[j+1] - R[j],  Z[j+1] - Z[j]])
+    Tm = unit([R[j]  - R[jm], Z[j]  - Z[jm]])
+    Tp = unit([R[jp] - R[j],  Z[jp] - Z[j]])
 
-    #Reverse first segment and treat vertex as origin.
+    #Reverse first segment, treating vertex as origin.
     #Sum unit vectors to get bisector.
     B = -Tm + Tp
     Bu = unit(B)
 
     #Need to deal with concave vs convex vertex.
-    #Use tiny segment to test correctly inside since full value could lie outside if passing another wall.
+    #Test with tiny segment for inside since full value could lie outside if passing another wall.
     if not wall_path.contains_point((Rb + PATH_TOL*Bu[0], Zb + PATH_TOL*Bu[1])):
         Bu = -Bu
 
@@ -221,7 +224,7 @@ def nearest_point_on_path(Rw, Zw, Rg, Zg):
     perp = ga - proj[:, None]*n #Perp vector to add to g to get to intersection.
 
     #Clamp point on line to endpoints. t = length along ab.
-    t_raw = np.sum(((g + perp - a)*d), axis=1)/dd
+    t_raw = np.sum(((g + perp - a)*d), axis=1)/dd #Vec formula for length along line.
     before_cond = (t_raw < 0.0)[:,None]
     after_cond  = (t_raw > 1.0)[:,None]
     perp  = np.select([before_cond, after_cond], [a - g, b - g], default=perp)
@@ -250,9 +253,11 @@ def reflect_ghost_across_wall(wall_path, Rg, Zg):
         N_len = np.sqrt(N_b[0]**2 + N_b[1]**2)
         N_b[0], N_b[1] = N_len*bsct[0], N_len*bsct[1]
 
-    #Lastly, if image point is outside, divide extra length in half successively.
-    #TODO: Find second intercept and go halfway between two boundaries?
+    #Store image point.
     Rimg, Zimg = Rb + N_b[0], Zb + N_b[1]
+
+    #Lastly, if image point is outside, remove half of image length successively.
+    #TODO: Find second intercept and go halfway between two boundaries?
     while not wall_path.contains_points([[Rimg, Zimg]], radius=PATH_EDGE_IN_BIAS):
         print("Moving outer image point back in.")
         print(Rg, Zg)
@@ -288,7 +293,7 @@ def get_neighbor_mask(point_mask, connectivity=4):
         ul[1:, 1:]  = point_mask[:-1, :-1]
         ur[:-1,1:]  = point_mask[1:,  :-1]
         dl[1:, :-1] = point_mask[:-1, 1: ]
-        dr[:-1,:-1] = point_mask[1:,   1: ]
+        dr[:-1,:-1] = point_mask[1:,  1: ]
 
         neighbor_any |= (ul | ur | dl | dr)
 
@@ -715,7 +720,7 @@ def main(args):
     #Read eqdsk file.
     gfile_dir = "/home/tirkas1/Workspace/TokData/"
     device = "DIIID" + "/"
-    #device = "TCV" + "/"
+    device = "TCV" + "/"
     gfile1 = "g162940.02944_670" #Old ql one.
     gfile2 = "g163241.03500" #Old DIIID one.
     #Ben's test cases for varying Ip and B0 directions.
@@ -725,7 +730,7 @@ def main(args):
     gfile6 = "g176312.03000"
     #TCV Case for simpler geometry.
     gfile7 = "65402_t1.eqdsk" #TODO: Need to make sure nr != nz is ok. TCV quite elongated.
-    gfilename = gfile1
+    gfilename = gfile7
     gfilepath = gfile_dir + device + gfilename
     print("Reading EQDSK file...")
     with open(gfilepath, "r", encoding="utf-8") as file:
@@ -764,7 +769,7 @@ def main(args):
 
     #Toroidal field component and q(psi).
     psi1D = np.linspace(paxis, pbdry, nrg)
-    #psi1D = np.linspace(pbdry, paxis, nrg) #TODO: For TCV it seems r is backwards??? Different cocos convention?
+    psi1D = np.linspace(pbdry, paxis, nrg) #TODO: For TCV it seems r is backwards??? Different cocos convention?
     #TODO: Why doesnt ext=0 work ok when tracing field?
     f_spl = interpolate.InterpolatedUnivariateSpline(psi1D, fpol, ext=3) #ext=3 uses boundary values outside range.
     q_spl = interpolate.InterpolatedUnivariateSpline(psi1D, qpsi, ext=3) #ext=0 uses extrapolation as with RectBivSpline on 2D but doesnt work in the integrator.
@@ -832,7 +837,7 @@ def main(args):
 
     #Grab wall points to test points in domain.
     print("Generating wall boundary path...")
-    wall_path, rlmt2, zlmt2 = make_path(rlmt,zlmt)
+    wall_path, Rw, Zw = make_path(rlmt,zlmt)
 
     R2D, Z2D = np.meshgrid(Rg, Zg, indexing="ij")
     sep_atol, sep_maxits = 1e-5, 1000 #Store default settings from hypnotoad examples.
@@ -864,13 +869,13 @@ def main(args):
     fwdPts = np.zeros_like(gridPts)
     bwdPts = np.zeros_like(gridPts)
     print("Generating forward and backward points on whole grid...")
-    for idx, (r0, z0) in enumerate(gridPts):
-        sln = trace_field_line(r0, z0, phi_val,
-                            sign_b0*dphi, field_line_rhs)
-        fwdPts[idx, 0], fwdPts[idx, 1] = sln.y[0, -1], sln.y[1, -1]
-        sln = trace_field_line(r0, z0, phi_val,
-                            -sign_b0*dphi, field_line_rhs)
-        bwdPts[idx, 0], bwdPts[idx, 1] = sln.y[0, -1], sln.y[1, -1]
+    #for idx, (r0, z0) in enumerate(gridPts):
+    #    sln = trace_field_line(r0, z0, phi_val,
+    #                        sign_b0*dphi, field_line_rhs)
+    #    fwdPts[idx, 0], fwdPts[idx, 1] = sln.y[0, -1], sln.y[1, -1]
+    #    sln = trace_field_line(r0, z0, phi_val,
+    #                        -sign_b0*dphi, field_line_rhs)
+    #    bwdPts[idx, 0], bwdPts[idx, 1] = sln.y[0, -1], sln.y[1, -1]
 
     #Generate ghost point mask and BC information.
     #TODO: Add parallel BCs as well based on traced points from above.
