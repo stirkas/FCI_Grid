@@ -178,16 +178,15 @@ def length(v):
 def unit(v):
     return v/length(v)
 
-def vertex_bisector(R, Z, Rb, Zb, wall_path, j):
+def vertex_bisector(Rw, Zw, Rb, Zb, wall_path, j):
     #Need to ignore final (closure) point when considering last vertex.
     #Note j here is the segment index.
-    wrap = lambda i: i % (len(R)-1)
-    jm = wrap(j-1)
-    jp = wrap(j+1)
+    jm = (j-1) % (len(Rw)-1)
+    jp = (j+1) % (len(Rw)-1)
 
     # edge tangents (into and out of the vertex)
-    Tm = unit([R[j]  - R[jm], Z[j]  - Z[jm]])
-    Tp = unit([R[jp] - R[j],  Z[jp] - Z[j]])
+    Tm = unit([Rw[j]-Rw[jm], Zw[j]-Zw[jm]])
+    Tp = unit([Rw[jp]-Rw[j], Zw[jp]-Zw[j]])
 
     #Reverse first segment, treating vertex as origin.
     #Sum unit vectors to get bisector.
@@ -720,7 +719,7 @@ def main(args):
     #Read eqdsk file.
     gfile_dir = "/home/tirkas1/Workspace/TokData/"
     device = "DIIID" + "/"
-    device = "TCV" + "/"
+    #device = "TCV" + "/"
     gfile1 = "g162940.02944_670" #Old ql one.
     gfile2 = "g163241.03500" #Old DIIID one.
     #Ben's test cases for varying Ip and B0 directions.
@@ -730,7 +729,7 @@ def main(args):
     gfile6 = "g176312.03000"
     #TCV Case for simpler geometry.
     gfile7 = "65402_t1.eqdsk" #TODO: Need to make sure nr != nz is ok. TCV quite elongated.
-    gfilename = gfile7
+    gfilename = gfile3
     gfilepath = gfile_dir + device + gfilename
     print("Reading EQDSK file...")
     with open(gfilepath, "r", encoding="utf-8") as file:
@@ -769,7 +768,7 @@ def main(args):
 
     #Toroidal field component and q(psi).
     psi1D = np.linspace(paxis, pbdry, nrg)
-    psi1D = np.linspace(pbdry, paxis, nrg) #TODO: For TCV it seems r is backwards??? Different cocos convention?
+    #psi1D = np.linspace(pbdry, paxis, nrg) #TODO: For TCV it seems r is backwards??? Different cocos convention?
     #TODO: Why doesnt ext=0 work ok when tracing field?
     f_spl = interpolate.InterpolatedUnivariateSpline(psi1D, fpol, ext=3) #ext=3 uses boundary values outside range.
     q_spl = interpolate.InterpolatedUnivariateSpline(psi1D, qpsi, ext=3) #ext=0 uses extrapolation as with RectBivSpline on 2D but doesnt work in the integrator.
@@ -797,11 +796,11 @@ def main(args):
     nrp, nzp = nr + 2*rpad, nz + 2*zpad
     R, Z = np.linspace(rmin, rmax, nr), np.linspace(zmin, zmax, nz)
     dR = R[1]-R[0]
-    ghosts_lo_R = R[0]  - dR*np.arange(rpad, 0, -1)
-    ghosts_hi_R = R[-1] + dR*np.arange(1, rpad+1)
     dZ = Z[1]-Z[0]
-    ghosts_lo_Z = Z[0]  - dZ * np.arange(zpad, 0, -1)
-    ghosts_hi_Z = Z[-1] + dZ * np.arange(1, zpad+1)
+    ghosts_lo_R = R[0]  - dR*np.arange(rpad, 0, -1)
+    ghosts_lo_Z = Z[0]  - dZ*np.arange(zpad, 0, -1)
+    ghosts_hi_R = R[-1] + dR*np.arange(1, rpad+1)
+    ghosts_hi_Z = Z[-1] + dZ*np.arange(1, zpad+1)
     R = np.concatenate((ghosts_lo_R, R, ghosts_hi_R))
     Z = np.concatenate((ghosts_lo_Z, Z, ghosts_hi_Z))
     RR, ZZ = np.meshgrid(R,Z,indexing='ij')
@@ -866,16 +865,16 @@ def main(args):
 
     #Trace all grid points once back and forth.
     gridPts = np.column_stack((RR.ravel(), ZZ.ravel()))
-    fwdPts = np.zeros_like(gridPts)
-    bwdPts = np.zeros_like(gridPts)
+    fwdPts  = np.zeros_like(gridPts)
+    bwdPts  = np.zeros_like(gridPts)
     print("Generating forward and backward points on whole grid...")
-    #for idx, (r0, z0) in enumerate(gridPts):
-    #    sln = trace_field_line(r0, z0, phi_val,
-    #                        sign_b0*dphi, field_line_rhs)
-    #    fwdPts[idx, 0], fwdPts[idx, 1] = sln.y[0, -1], sln.y[1, -1]
-    #    sln = trace_field_line(r0, z0, phi_val,
-    #                        -sign_b0*dphi, field_line_rhs)
-    #    bwdPts[idx, 0], bwdPts[idx, 1] = sln.y[0, -1], sln.y[1, -1]
+    for idx, (r0, z0) in enumerate(gridPts):
+        sln = trace_field_line(r0, z0, phi_val,
+                            sign_b0*dphi, field_line_rhs)
+        fwdPts[idx, 0], fwdPts[idx, 1] = sln.y[0, -1], sln.y[1, -1]
+        sln = trace_field_line(r0, z0, phi_val,
+                            -sign_b0*dphi, field_line_rhs)
+        bwdPts[idx, 0], bwdPts[idx, 1] = sln.y[0, -1], sln.y[1, -1]
 
     #Generate ghost point mask and BC information.
     #TODO: Add parallel BCs as well based on traced points from above.
