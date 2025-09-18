@@ -16,6 +16,8 @@ from hypnotoad import __version__
 from hypnotoad.geqdsk._geqdsk import read as gq_read #TODO: Use FreeQDSK like zoidberg?
 from hypnotoad.utils.critical import find_critical as fc
 
+from boundary import PolygonBoundary
+
 #TODO:Add unit tests to make sure functionality is reasonable? Convert to classes with type hints, type checks, and header comments?
 
 #Colored output, works for linux...
@@ -172,228 +174,6 @@ def make_3d(arr_2d: np.ndarray, ny: int) -> np.ndarray:
 
     return np.repeat(arr_2d[:, np.newaxis, :], ny, axis=1)
 
-def length(v):
-    return np.sqrt(np.dot(v,v))
-
-def unit(v):
-    return v/length(v)
-
-def vertex_bisector(Rw, Zw, Rb, Zb, wall_path, j):
-    #Need to ignore final (closure) point when considering last vertex.
-    #Note j here is the segment index.
-    jm = (j-1) % (len(Rw)-1)
-    jp = (j+1) % (len(Rw)-1)
-
-    # edge tangents (into and out of the vertex)
-    Tm = unit([Rw[j]-Rw[jm], Zw[j]-Zw[jm]])
-    Tp = unit([Rw[jp]-Rw[j], Zw[jp]-Zw[j]])
-
-    #Reverse first segment, treating vertex as origin.
-    #Sum unit vectors to get bisector.
-    B = -Tm + Tp
-    Bu = unit(B)
-
-    #Need to deal with concave vs convex vertex.
-    #Test with tiny segment for inside since full value could lie outside if passing another wall.
-    if not wall_path.contains_point((Rb + PATH_TOL*Bu[0], Zb + PATH_TOL*Bu[1])):
-        Bu = -Bu
-
-    return Bu
-
-def nearest_point_on_path(Rw, Zw, Rg, Zg):
-    """Return (seg_index, t, Rb, Zb) where (Rb,Zb) is closest point on polyline to (Rg,Zg).
-        
-    Vector formulation from wiki page "Distance from a point to a line". See image there for illustration.
-    Assuming eqn of line is x = a + tn for t in [0,1]:
-    (a-p)                  #Vector from point to line start.
-    (a-p) dot n            #Projection of a-p onto line 
-    (a-p) - ((a-p) dot n)n #Component of a-p perp to line!
-    """
-    #Get segment vectors and vector to starts from ghost points.
-    a = np.column_stack([Rw[:-1], Zw[:-1]]) #Segment start points
-    b = np.column_stack([Rw[1:],  Zw[1: ]]) #Segment end points
-    g = np.array([Rg, Zg])                  #Ghost points
-    d = b - a                               #Segment vectors
-    dd = np.sum(d*d, axis=1)
-    l  = np.sqrt(dd) #TODO: Use length functions? Handle vectors consistently...
-    n = d/l[:,None]                         #Segment unit vectors
-
-    ga = a - g                  #Ghost point to seg start vectors
-    proj = np.sum(ga*n, axis=1) #Projection of vector along n.
-    perp = ga - proj[:, None]*n #Perp vector to add to g to get to intersection.
-
-    #Clamp point on line to endpoints. t = length along ab.
-    t_raw = np.sum(((g + perp - a)*d), axis=1)/dd #Vec formula for length along line.
-    before_cond = (t_raw < 0.0)[:,None]
-    after_cond  = (t_raw > 1.0)[:,None]
-    perp  = np.select([before_cond, after_cond], [a - g, b - g], default=perp)
-
-    # pick nearest segment
-    j = int(np.argmin(np.sum((perp)**2, axis=1)))
-
-    return j, t_raw[j], [float(perp[j,0]), float(perp[j,1])]
-
-def reflect_ghost_across_wall(wall_path, Rg, Zg):
-    #Get wall points.
-    Rw, Zw = wall_path.vertices[:,0], wall_path.vertices[:,1]
-    #Get info about intersection point. Segment index, location along segment,
-    #and normal vector from ghost to boundary.
-    idx_b, loc_b, N_b = nearest_point_on_path(Rw, Zw, Rg, Zg)
-    Rb, Zb = Rg + N_b[0], Zg + N_b[1]
-
-    #If boundary point is an endpoint, follow bisection angle.
-    if (loc_b <= 0.0) or (loc_b >= 1.0):
-        print("Calculating bisection vector.")
-        print(Rg, Zg)
-        if loc_b >= 1.0:
-            idx_b += 1
-        bsct = vertex_bisector(Rw, Zw, Rb, Zb, wall_path, idx_b)
-        #Overwrite N_b with bisector.
-        N_len = np.sqrt(N_b[0]**2 + N_b[1]**2)
-        N_b[0], N_b[1] = N_len*bsct[0], N_len*bsct[1]
-
-    #Store image point.
-    Rimg, Zimg = Rb + N_b[0], Zb + N_b[1]
-
-    #Lastly, if image point is outside, remove half of image length successively.
-    #TODO: Find second intercept and go halfway between two boundaries?
-    while not wall_path.contains_points([[Rimg, Zimg]], radius=PATH_EDGE_IN_BIAS):
-        print("Moving outer image point back in.")
-        print(Rg, Zg)
-        Rout,  Zout = Rimg - Rb, Zimg - Zb
-        Rimg, Zimg  = Rb + Rout/2, Zb + Zout/2
-
-    return (Rb, Zb), (Rimg, Zimg)
-
-def get_neighbor_mask(point_mask, connectivity=4):
-    """
-    Given a set of points which are true in point_mask, return a mask with their neighbors.
-    Changing connectivity to 8 includes diagonals.
-    """
-    # neighbors (booleans says: does this cell have a neighbor in that direction?)
-    left  = np.zeros_like(point_mask, bool)
-    right = np.zeros_like(point_mask, bool)
-    down  = np.zeros_like(point_mask, bool)
-    up    = np.zeros_like(point_mask, bool)
-    
-    left[1:,:]   = point_mask[:-1,:]
-    right[:-1,:] = point_mask[1:,:]
-    down[:,1:]   = point_mask[:,:-1]
-    up[:,:-1]    = point_mask[:,1:]
-
-    neighbor_any = left | right | up | down
-
-    if connectivity == 8:
-        ul = np.zeros_like(point_mask, bool)
-        ur = np.zeros_like(point_mask, bool)
-        dl = np.zeros_like(point_mask, bool)
-        dr = np.zeros_like(point_mask, bool)
-
-        ul[1:, 1:]  = point_mask[:-1, :-1]
-        ur[:-1,1:]  = point_mask[1:,  :-1]
-        dl[1:, :-1] = point_mask[:-1, 1: ]
-        dr[:-1,:-1] = point_mask[1:,  1: ]
-
-        neighbor_any |= (ul | ur | dl | dr)
-
-    return neighbor_any
-
-def handle_bounds(RR, ZZ, wall_path, show=False):
-    """
-    Generate ghost mask and boundary conditions.
-    """
-    pts = np.column_stack([RR.ravel(), ZZ.ravel()])
-    inside = wall_path.contains_points(pts, radius=PATH_EDGE_IN_BIAS)
-    inside = inside.reshape(RR.shape)
-    neigbors_in = get_neighbor_mask(inside)
-    ghost_mask = (~inside) & neigbors_in
-
-    #Now generate mask for inside cells which touch outside ones.
-    outside = ~inside
-    neighbors_out = get_neighbor_mask(outside)
-    in_mask = inside & neighbors_out
-
-    #Get image points from ghost cells and wall points.
-    Rg = RR[ghost_mask]
-    Zg = ZZ[ghost_mask]
-    Rb_list,   Zb_list   = [], []
-    Rimg_list, Zimg_list = [], []
-    for rgi, zgi in zip(Rg, Zg):
-        (Rb, Zb), (Rimg, Zimg) = reflect_ghost_across_wall(wall_path, rgi, zgi)
-        Rb_list.append(Rb);     Zb_list.append(Zb)
-        Rimg_list.append(Rimg); Zimg_list.append(Zimg)
-
-    if show:
-        fig, ax = plt.subplots(figsize=(8,6))
-        patch = PathPatch(wall_path, facecolor='none', edgecolor='k', lw=2)
-        ax.add_patch(patch)
-
-        # ghost (green) and boundary-inside (blue)
-        ax.scatter(RR[ghost_mask], ZZ[ghost_mask], s=16, c='g',   marker='o', label='ghost')
-        ax.scatter(RR[in_mask],    ZZ[in_mask],    s=16, c='blue',marker='o', label='inner')
-
-        # image points (red)
-        ax.scatter(Rimg_list, Zimg_list, s=20, c='red', marker='o', label='image')
-
-        # red intercept lines: ghost → boundary intercept
-        for rgi, zgi, rbi, zbi, rimi, zimi in zip(Rg, Zg, Rb_list, Zb_list, Rimg_list, Zimg_list):
-            ax.plot([rgi, rbi, rimi], [zgi, zbi, zimi], 'r-', lw=2, alpha=0.6)
-
-        ax.set_aspect('equal', 'box')
-        ax.set_xlabel('R')
-        ax.set_ylabel('Z')
-        ax.legend(loc='best')
-        plt.tight_layout()
-        plt.show()
-
-    return ghost_mask
-
-CLOSED_PATH_TOL   =  0.0
-PATH_TOL          =  1e-12
-PATH_EDGE_IN_BIAS = -PATH_TOL #Use to bias points on wall to inside.
-PATH_ANGLE_TOL    =  1e-12
-def make_path(rpts, zpts, abs_tol=CLOSED_PATH_TOL):
-    if abs_tol == CLOSED_PATH_TOL:
-        warn("Constructing closed path with tol of " + str(CLOSED_PATH_TOL) + \
-              ". This seems generally ok for gfiles.")
-
-    if rpts.shape != zpts.shape or rpts.size < 3:
-        raise ValueError("Need matching size R,Z arrays with ≥4 points (a closed triangle at minimum).")
-
-    #Exact-closure check by default.
-    end_gap = float(np.hypot(rpts[-1]-rpts[0], zpts[-1]-zpts[0]))
-    if (end_gap > abs_tol):
-        warn("First and last wall points not exactly equal within tol: " + str(abs_tol) + ". " \
-            + "Forcing wall closure at final point (" + str(rpts[0]) + ", " + str(zpts[0]) + "),\
-              double check wall looks closed correctly.")
-        rpts = np.append(rpts, rpts[0])
-        zpts = np.append(zpts, zpts[0])
-
-    #Remove segments with zero length, but keep final segment which wraps around to beginning.
-    r_zero = np.abs(np.diff(rpts)) > abs_tol
-    z_zero = np.abs(np.diff(zpts)) > abs_tol
-    keep = np.concatenate([(r_zero | z_zero), np.array([True])])
-    rpts, zpts = rpts[keep], zpts[keep]
-    #Also remove unnecessary segments (middle segments along a vert/horz line).
-    #TODO: Update for angled lines, not just horz/vert? Use PATH_ANGLE_TOL for colinear check?
-    drop_mid_r = (np.abs(np.diff(rpts[:-1])) <= abs_tol) & (np.abs(np.diff(rpts[1:])) <= abs_tol)
-    drop_mid_z = (np.abs(np.diff(zpts[:-1])) <= abs_tol) & (np.abs(np.diff(zpts[1:])) <= abs_tol)
-    drop_mid   = drop_mid_r | drop_mid_z
-    drop_mid   = np.concatenate([np.array([False]), drop_mid, np.array([False])])
-    keep       = ~drop_mid
-    rpts, zpts = rpts[keep], zpts[keep]
-
-    #Build a Path with explicit CLOSEPOLY...i.e. tell Path() class it is explicitly closed.
-    verts = np.column_stack([rpts, zpts])
-    codes = np.full(len(verts), path.Path.LINETO, dtype=np.uint8)
-    #Set start and end vertex information per docs.
-    codes[0]  = path.Path.MOVETO
-    codes[-1] = path.Path.CLOSEPOLY
-
-    wall_path = path.Path(verts, codes)
-
-    return wall_path, rpts, zpts
-
 def setup_field_line_interpolation(R_grid, Z_grid, dRdphi, dZdphi, linear=0):
     """
     Set up interpolators for field line derivatives
@@ -433,7 +213,7 @@ def setup_field_line_interpolation(R_grid, Z_grid, dRdphi, dZdphi, linear=0):
     
     return field_line_rhs
 
-def trace_until_wall(R0, Z0, phi_init, dphi, field_line_rhs, wall_path, direction=1):
+def trace_until_wall(R0, Z0, phi_init, dphi, field_line_rhs, wall, direction=1):
     """
     Trace a field line starting at (R0, Z0) from phi_init in steps of dphi
     (sign given by direction), stopping as soon as the point exits wall_path.
@@ -456,7 +236,7 @@ def trace_until_wall(R0, Z0, phi_init, dphi, field_line_rhs, wall_path, directio
         Rn, Zn = sol.y[0, -1], sol.y[1, -1]
 
         # stop if we’ve left the wall
-        if not wall_path.contains_point((Rn, Zn)):
+        if not wall.contains(Rn, Zn):
             break
 
         # otherwise record and continue
@@ -641,8 +421,7 @@ def findIndex(R, Z, Rmin, Zmin, dR, dZ, bdry, show=False):
     # domains.
 
     #Mask out points around boundary.
-    pts = np.column_stack([R.ravel(), Z.ravel()])
-    inside = bdry.contains_points(pts, radius=PATH_EDGE_IN_BIAS)
+    inside = bdry.contains(R,Z)
     inside = inside.reshape((R.shape[0], R.shape[1]))
 
     nrp, nzp = len(R), len(Z)
@@ -653,7 +432,7 @@ def findIndex(R, Z, Rmin, Zmin, dR, dZ, bdry, show=False):
         fig, ax = plt.subplots(figsize=(6,6))
 
         # 1) draw the wall Path itself
-        patch = PathPatch(bdry, facecolor='none', edgecolor='k', lw=2)
+        patch = PathPatch(bdry.path, facecolor='none', edgecolor='k', lw=2)
         ax.add_patch(patch)
 
         # 2) scatter the points inside (green) and outside (red)
@@ -674,7 +453,7 @@ def findIndex(R, Z, Rmin, Zmin, dR, dZ, bdry, show=False):
 
     return xind, zind
 
-def plot(R, Z, psi, ghost, rbdy, zbdy, rlmt, zlmt, sign_b0,
+def plot(R, Z, psi, ghost, rbdy, zbdy, wall, sign_b0,
         Rvals_pos, Zvals_pos, Rvals_neg, Zvals_neg, opoints, xpoints,
         checkPts, gridPts, fwdPts, bwdPts):
     #Plot contours, LCFS, wall and field line.
@@ -684,7 +463,8 @@ def plot(R, Z, psi, ghost, rbdy, zbdy, rlmt, zlmt, sign_b0,
     #cf = ax.contourf(RR, ZZ, psi, levels=100, cmap='viridis') #How to plot without tranposing on a meshgrid.
     plt.colorbar(cf, ax=ax)
     ax.plot(rbdy, zbdy, '.-', color='orange', label='LCFS')
-    ax.plot(rlmt, zlmt, '-',  color='black',  label='Wall')
+    patch = PathPatch(wall.path, facecolor='none', edgecolor='k', lw=2)
+    ax.add_patch(patch)
     ax.add_patch(ghost)
     phi_dir, neg_phi_dir = ('+','-') if sign_b0 == 1 else ('-','+')
     ax.plot(Rvals_pos, Zvals_pos, '.', color='red',  label='$+B_{\\phi} = ' + phi_dir     + '\\phi$')
@@ -729,7 +509,7 @@ def main(args):
     gfile6 = "g176312.03000"
     #TCV Case for simpler geometry.
     gfile7 = "65402_t1.eqdsk" #TODO: Need to make sure nr != nz is ok. TCV quite elongated.
-    gfilename = gfile3
+    gfilename = gfile1
     gfilepath = gfile_dir + device + gfilename
     print("Reading EQDSK file...")
     with open(gfilepath, "r", encoding="utf-8") as file:
@@ -777,7 +557,7 @@ def main(args):
     #Generate simulation grid (lower res + guard cells)
     #TODO: Can pad in z as well in full FCI case, but wont matter if gfile large outside mask. But Z periodic in BOUT...
     rpad, phipad, zpad = 2, 1, 2 #Padding/ghost cells on each end.
-    r_res, phi_res, z_res = 64, 64, 64
+    r_res, phi_res, z_res = 64, 16, 64
     nr, nphi, nz = r_res, 1, z_res
     phi_val = 0 #Take phi=0 to be starting point.
     dphi = 2*np.pi/phi_res
@@ -836,7 +616,7 @@ def main(args):
 
     #Grab wall points to test points in domain.
     print("Generating wall boundary path...")
-    wall_path, Rw, Zw = make_path(rlmt,zlmt)
+    wall = PolygonBoundary(rlmt,zlmt)
 
     R2D, Z2D = np.meshgrid(Rg, Zg, indexing="ij")
     sep_atol, sep_maxits = 1e-5, 1000 #Store default settings from hypnotoad examples.
@@ -845,10 +625,10 @@ def main(args):
     #TODO: Can try removing points within certain flux surface outside of LCFS?
     # |--->  Probably use psi spline from R,Z to drop points a bit outside LCFS.
     for points in opoints[:]:
-        if not wall_path.contains_point((points[0], points[1])):
+        if not wall.contains(points[0], points[1]):
             opoints.remove(points)
     for points in xpoints[:]:
-        if not wall_path.contains_point((points[0], points[1])):
+        if not wall.contains(points[0], points[1]):
             xpoints.remove(points)
 
     #For BSTING just set to nx + 1. Used for mpi communication for FCI, so don't separate anything.
@@ -857,11 +637,11 @@ def main(args):
     #Trace field lines in both directions.
     print("Tracing field line in forward direction...")
     Rvals_pos, Zvals_pos = trace_until_wall(R1, Z1, phi_val, dphi, field_line_rhs,
-                                         wall_path, direction=sign_b0)
+                                         wall, direction=sign_b0)
     #Rvals_pos_lin, Zvals_pos_lin = trace_until_wall(R1, Z1, zeta_arr, field_line_rhs_lin, wall_pts, direction=sign_b0)
     print("Tracing field line in backward direction...")
     Rvals_neg, Zvals_neg = trace_until_wall(R1, Z1, phi_val, dphi, field_line_rhs,
-                                         wall_path, direction=-sign_b0)
+                                         wall, direction=-sign_b0)
 
     #Trace all grid points once back and forth.
     gridPts = np.column_stack((RR.ravel(), ZZ.ravel()))
@@ -879,7 +659,7 @@ def main(args):
     #Generate ghost point mask and BC information.
     #TODO: Add parallel BCs as well based on traced points from above.
     print("Generating ghost cells and boundary conditions...")
-    ghosts = handle_bounds(RR, ZZ, wall_path, show=True)
+    ghosts = wall.handle_bounds(RR, ZZ, show=True)
 
     #Convert mapping points back to 2d arrays.
     Rfwd = fwdPts[:,0].reshape(nrp, nzp)
@@ -895,7 +675,7 @@ def main(args):
     bwdPtsFinal = bwdPts[indices]
     #Remove points outside the wall for all three arrays at once.
     keptPts = [(g, f, b) for (g, f, b) in zip(gridPtsFinal, fwdPtsFinal, bwdPtsFinal)
-            if wall_path.contains_point((g[0], g[1]))]
+            if wall.contains(g[0], g[1])]
     gridPtsFinal, fwdPtsFinal, bwdPtsFinal = map(list, zip(*keptPts))
 
     #Generate metric and maps and so on to write out for BSTING.
@@ -906,8 +686,8 @@ def main(args):
     }
     #Need to do this all in 3D now, didn't need the complication before.
     R3, phi3, Z3 = np.meshgrid(R, phi_arr, Z, indexing='ij')
-    fwd_xtp, fwd_ztp = findIndex(Rfwd, Zfwd, R[0], Z[0], dR, dZ, wall_path, show=True)
-    bwd_xtp, bwd_ztp = findIndex(Rbwd, Zbwd, R[0], Z[0], dR, dZ, wall_path, show=True)
+    fwd_xtp, fwd_ztp = findIndex(Rfwd, Zfwd, R[0], Z[0], dR, dZ, wall, show=True)
+    bwd_xtp, bwd_ztp = findIndex(Rbwd, Zbwd, R[0], Z[0], dR, dZ, wall, show=True)
 
     maps = {
         "R": R3,
@@ -1050,7 +830,7 @@ def main(args):
     plotting = True
     checkPts = True
     if (plotting):
-        plot(R, Z, psi, ghost, rbdy, zbdy, rlmt2, zlmt2,
+        plot(R, Z, psi, ghost, rbdy, zbdy, wall,
             sign_b0, Rvals_pos, Zvals_pos, Rvals_neg, Zvals_neg,
             opoints, xpoints, checkPts, gridPtsFinal, fwdPtsFinal, bwdPtsFinal)
 

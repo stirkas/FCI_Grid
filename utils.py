@@ -1,0 +1,156 @@
+from __future__ import annotations #Only import when needed.
+from dataclasses import dataclass, field
+from enum import IntEnum
+from typing import ClassVar, Mapping, TextIO, TypeAlias, Union
+import os, sys
+
+import numpy as np
+
+#Useful math functions.
+def length(v):
+    return np.sqrt(np.dot(v,v))
+
+def unit(v):
+    return v/length(v)
+
+#Utility functions/classes
+#TODO: Put into boundary handler class? With image point calculations.
+def neighbor_mask(point_mask, connectivity=4):
+    """
+    Given a set of points which are true in point_mask, return a mask with their neighbors.
+    Changing connectivity to 8 includes diagonals.
+    """
+    #Neighbors (booleans says: does this cell have a neighbor in that direction?)
+    left  = np.zeros_like(point_mask, bool)
+    right = np.zeros_like(point_mask, bool)
+    down  = np.zeros_like(point_mask, bool)
+    up    = np.zeros_like(point_mask, bool)
+
+    left[1:,:]   = point_mask[:-1,:]
+    right[:-1,:] = point_mask[1:,:]
+    down[:,1:]   = point_mask[:,:-1]
+    up[:,:-1]    = point_mask[:,1:]
+
+    neighbor_any = left | right | up | down
+
+    if connectivity == 8:
+        ul = np.zeros_like(point_mask, bool)
+        ur = np.zeros_like(point_mask, bool)
+        dl = np.zeros_like(point_mask, bool)
+        dr = np.zeros_like(point_mask, bool)
+
+        ul[1:, 1:]  = point_mask[:-1, :-1]
+        ur[:-1,1:]  = point_mask[1:,  :-1]
+        dl[1:, :-1] = point_mask[:-1, 1: ]
+        dr[:-1,:-1] = point_mask[1:,  1: ]
+
+        neighbor_any |= (ul | ur | dl | dr)
+
+    return neighbor_any
+
+#TODO: Update to use python logging and warning classes?
+#TODO: Clean up the logger that ChatGPT created...
+class Logger:
+    __slots__ = ("min_level", "stream", "force_color", "palette")
+    
+    # Nested enum (users don't need to import this)
+    class Level(IntEnum):
+        DEBUG = 10
+        INFO = 20
+        WARNING = 30
+        ERROR = 40
+    
+    LevelType: TypeAlias = Union["Logger.Level", str, int]
+
+    # class-level ANSI codes
+    GREEN = "\033[92m"
+    BLUE  = "\033[94m"
+    YELLOW= "\033[33m"
+    RED   = "\033[31m"
+    RESET = "\033[0m"
+
+    # class-level defaults
+    PREFIX: Mapping[Level, str] = {
+        Level.DEBUG:   "DEBUG: ",
+        Level.INFO:    "INFO: ",
+        Level.WARNING: "WARNING: ",
+        Level.ERROR:   "ERROR: "}
+    DEFAULT_PALETTE: Mapping[Level, str] = {
+        Level.DEBUG:   GREEN,
+        Level.INFO:    BLUE,
+        Level.WARNING: YELLOW,
+        Level.ERROR:   RED}
+
+    def __init__(self, min_level: LevelType = "warning",
+            stream: TextIO = sys.stdout, force_color: bool | None = None,
+            palette: Mapping[Level, str] | None = None) -> None:
+        self.min_level  = self._level_from(min_level)
+        self.stream     = stream
+        self.force_color= force_color
+        self.palette    = palette or self.DEFAULT_PALETTE  # override per instance if you want
+
+    # Accept Logger.Level | str | int
+    @classmethod
+    def _level_from(cls, v: LevelType) -> "Level":
+        L = cls.Level
+        if isinstance(v, L):   return v
+        if isinstance(v, int): return {10: L.DEBUG, 20: L.INFO, 30: L.WARNING, 40: L.ERROR}[v]
+        s = str(v).lower()
+        return {"debug": L.DEBUG, "dbg": L.DEBUG, "d": L.DEBUG,
+                "info": L.INFO, "i": L.INFO,
+                "warning": L.WARNING, "warn": L.WARNING, "w": L.WARNING,
+                "error": L.ERROR, "err": L.ERROR, "e": L.ERROR}[s]
+
+    def log(self, message: object, level: LevelType = "info") -> None:
+        lvl = self._level_from(level)
+        if lvl < self.min_level:
+            return
+        text = f"{self.PREFIX[lvl]}{message}"
+        color = self.palette.get(lvl, "")
+        if self._use_color() and color:
+            self.stream.write(f"{color}{text}{self.RESET}\n")
+        else:
+            self.stream.write(text + "\n")
+        self.stream.flush()
+
+    # conveniences
+    def debug(self, msg: object) -> None: self.log(msg, self.Level.DEBUG)
+    def info(self, msg: object) -> None:  self.log(msg, self.Level.INFO)
+    def warn(self, msg: object) -> None:  self.log(msg, self.Level.WARNING)
+    def err(self, msg: object) -> None:   self.log(msg, self.Level.ERROR)
+
+    def _use_color(self) -> bool:
+        if self.force_color is not None:
+            return self.force_color
+        try:
+            return self.stream.isatty() and os.environ.get("TERM", "") not in ("", "dumb")
+        except Exception:
+            return False
+
+@dataclass(slots=True, frozen=True)
+class Tolerances:
+    #Not a field: class-level constant
+    DEFAULT_CLOSED_PATH_TOL: ClassVar[float] = 0.0
+
+    path_tol:        float = 1e-12
+    path_angle_tol:  float = 1e-12
+    closed_path_tol: float = DEFAULT_CLOSED_PATH_TOL #For testing path is closed.
+    path_edge_in_bias: float | None = field(default=None) #Use to bias points on wall to inside.
+
+    def __post_init__(self):
+        if self.path_edge_in_bias is None:
+            object.__setattr__(self, "path_edge_in_bias", -self.path_tol) #Bias points inside.
+        if self.closed_path_tol < 0:
+            raise ValueError("closed_path_tol must be ≥ 0")
+        if self.path_tol < 0:
+            raise ValueError("path_tol must be ≥ 0")
+        if self.path_angle_tol < 0:
+            raise ValueError("path_angle_tol must be ≥ 0")
+        
+        if self.closed_path_tol == self.DEFAULT_CLOSED_PATH_TOL:
+            logger.warn(f"Constructing closed paths with tol of {self.closed_path_tol:g}. "
+                "This is usually fine for gfiles.")
+
+#Define some useful globals.
+logger = Logger(min_level="info", stream=sys.stdout)
+DEFAULT_TOL = Tolerances()
