@@ -23,10 +23,11 @@ class CoordinateMapping(object):
         self.J, self.metric = self._make_metric()
 
         #Calculate finite volume operators. #TODO: Only really needs to happen in center...
-        #So call from outside or do outside from metric.
+        #So call from outside or do outside from metric?
         self.dagp_vars = self._create_dagp()
 
     def _get_coordinate(self, dx=0, dz=0):
+        #TODO: Is it ok now that nx != nz? zoidberg had lots of asserts.
         """Get coordinates (R, Z) at given (xind, zind) index
 
         Parameters
@@ -72,8 +73,8 @@ class CoordinateMapping(object):
                       [parR_z, parZ_z]], axis=0)
 
         #Metric tensor g_{ij} = Σ_k J_{k i} J_{k j}  (D’Haeseleer 2.5.27)
-        #So g=J^T J.
-        g = np.einsum('ki...,kj...->ij...', J, J)
+        #Note our J is transposed, so g = J J^T
+        g = np.einsum('ji...,ki...->jk...', J, J)#Calculate the gradient along each coordinate.
 
         assert np.all(g[0, 0] > 0), \
                 f"g[0, 0] is expected to be positive, but some values are not (minimum {np.min(g[0, 0])})"
@@ -241,3 +242,82 @@ class CoordinateMapping(object):
         }
 
         return dagp_vars
+
+###################
+####DAGP TEST CODE: TODO: Test DAGP vars...
+###
+###from numpy.polynomial.legendre import leggauss
+###
+#### ---- You provide these two callables (splines or analytic) ----
+#### Each must accept arrays x,z and return arrays of same shape.
+###R   = lambda x,z: Rspl.ev(x,z)            # or analytic R(x,z)
+###Rx  = lambda x,z: Rspl.ev(x,z, dx=1)      # dR/dx
+###Rz  = lambda x,z: Rspl.ev(x,z, dy=1)      # dR/dz
+###Z   = lambda x,z: Zspl.ev(x,z)
+###Zx  = lambda x,z: Zspl.ev(x,z, dx=1)
+###Zz  = lambda x,z: Zspl.ev(x,z, dy=1)
+###
+###def cov_metrics(x,z):
+###    Rxv,Rzv,Zxv,Zzv = Rx(x,z), Rz(x,z), Zx(x,z), Zz(x,z)
+###    gxx = Rxv*Rxv + Zxv*Zxv
+###    gxz = Rxv*Rzv + Zxv*Zzv
+###    gzz = Rzv*Rzv + Zzv*Zzv
+###    rtg = np.sqrt(np.maximum(gxx*gzz - gxz*gxz, 0.0))  # |J|
+###    return gxx, gxz, gzz, rtg
+###
+###def volumes_gauss(nx,nz, p=2, dx=1.0,dz=1.0):
+###    xi,w = leggauss(p)
+###    ii = np.arange(nx)[:,None,None,None]
+###    jj = np.arange(nz)[None,:,None,None]
+###    X = ii + 0.5*xi[None,None,:,None]
+###    Z = jj + 0.5*xi[None,None,None,:]
+###    X = np.broadcast_to(X, (nx,nz,p,p))
+###    Z = np.broadcast_to(Z, (nx,nz,p,p))
+###    gxx,gxz,gzz,rtg = cov_metrics(X,Z)
+###    vol = (dx*dz)/(4.0) * np.sum((w[:,None]*w[None,:])[None,None]* R(X,Z)*rtg, axis=(2,3))
+###    return vol
+###
+###def xface_facs_gauss(nx,nz, p=2, dz=1.0):
+###    xi,w = leggauss(p)
+###    X = (np.arange(nx-1)+0.5)[:,None,None]
+###    Z = np.arange(nz)[None,:,None] + 0.5*xi[None,None,:]
+###    X = np.broadcast_to(X, (nx-1,nz,p)); Z = np.broadcast_to(Z, (nx-1,nz,p))
+###    gxx,gxz,gzz,rtg = cov_metrics(X,Z)
+###    facXX = -(dz/2.0)*np.sum(w*( R(X,Z)*gzz/rtg ), axis=-1)
+###    facXZ =  (dz/2.0)*np.sum(w*( R(X,Z)*gxz/rtg ), axis=-1)
+###    return facXX, facXZ
+###
+###def zface_facs_gauss(nx,nz, p=2, dx=1.0):
+###    xi,w = leggauss(p)
+###    X = np.arange(nx)[:,None,None] + 0.5*xi[None,None,:]
+###    Z = (np.arange(nz-1)+0.5)[None,:,None]
+###    X = np.broadcast_to(X, (nx,nz-1,p)); Z = np.broadcast_to(Z, (nx,nz-1,p))
+###    gxx,gxz,gzz,rtg = cov_metrics(X,Z)
+###    facZX = -(dx/2.0)*np.sum(w*( R(X,Z)*gxz/rtg ), axis=-1)
+###    facZZ =  (dx/2.0)*np.sum(w*( R(X,Z)*gxx/rtg ), axis=-1)
+###    return facZX, facZZ
+###
+#### --- Reference (e.g., 8x8 and 8-pt) ---
+###def volumes_ref(nx,nz):        return volumes_gauss(nx,nz,p=8)
+###def xfaces_ref(nx,nz):         return xface_facs_gauss(nx,nz,p=8)
+###def zfaces_ref(nx,nz):         return zface_facs_gauss(nx,nz,p=8)
+###
+#### --- Method 2 (midpoint) just for volumes; faces analogous at face centers ---
+###def volumes_midpoint(nx,nz, dx=1.0,dz=1.0):
+###    ii,jj = np.meshgrid(np.arange(nx), np.arange(nz), indexing='ij')
+###    gxx,gxz,gzz,rtg = cov_metrics(ii,jj)
+###    return R(ii,jj)*rtg*dx*dz
+###
+#### Timing/accuracy example for one grid:
+###def benchmark(nx,nz,R,Z,Rx,Rz,Zx,Zz):
+###    t0=time.perf_counter()
+###    vref=volumes_ref(nx,nz); t1=time.perf_counter()
+###    v2  =volumes_midpoint(nx,nz); t2=time.perf_counter()
+###    v3  =volumes_gauss(nx,nz,p=2); t3=time.perf_counter()
+###    print(f"ref 8x8: {t1-t0:.3f}s  | midpoint: {t2-t1:.3f}s  | 2x2 Gauss: {t3-t2:.3f}s")
+###    rel2 = lambda a,b: np.linalg.norm((a-b).ravel())/np.linalg.norm(b.ravel())
+###    relinf=lambda a,b: np.max(np.abs(a-b))/np.max(np.abs(b))
+###    print(f"midpoint err L2={rel2(v2,vref):.3e}, Linf={relinf(v2,vref):.3e}")
+###    print(f"2x2 Gauss err L2={rel2(v3,vref):.3e}, Linf={relinf(v3,vref):.3e}")
+###
+###################

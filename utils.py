@@ -148,7 +148,7 @@ class Tolerances:
             raise ValueError("path_angle_tol must be ≥ 0")
         
         if self.closed_path_tol == self.DEFAULT_CLOSED_PATH_TOL:
-            logger.warn(f"Constructing closed paths with tol of {self.closed_path_tol:g}. "
+            logger.warn(f"Using tol of {self.closed_path_tol:f} to check paths are closed. "
                 "This is usually fine for gfiles.")
 
 #Define some useful globals.

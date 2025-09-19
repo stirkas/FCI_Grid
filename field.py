@@ -11,7 +11,7 @@ class MagneticField(object): #TODO: How best to derive from general base class?
         self.Bp_Z = -eqb.sign_ip*eqb.psi_func(grd.R, grd.Z, dx=1)/grd.RR
         self.Bphi = eqb.f_spl(eqb.psi_func(grd.R, grd.Z))/grd.RR
         self.Bp   = np.sqrt(self.Bp_R**2 + self.Bp_Z**2)
-        self.Bmag = np.sqrt(self.Bp**2 + self.Bphi**2)
+        self.Bmag = np.sqrt(self.Bp_R**2 + self.Bp_Z**2 + self.Bphi**2)
         self.pres = eqb.p_spl(eqb.psi_func(grd.R,grd.Z)) #Not really field related...
 
         self.dir  = eqb.sign_b0

@@ -18,6 +18,7 @@ class StructuredPoloidalGrid(object):
     #TODO: Move 3D logic outside poloidal grid class? Into general grid class?
 
     def __init__(self, eq_data, nr=64, nphi=8, nz=64, make3D=False, MRG=2, MYG=1, MZG=2):
+        #TODO: Is default padding in Z ok? Still periodic in BOUT...
         self.Lr = eq_data.rmax - eq_data.rmin
         self.Lz = eq_data.zmax - eq_data.zmin
 
@@ -104,8 +105,10 @@ class StructuredPoloidalGrid(object):
 
         return xpoints, opoints
 
-    def _make_mapping(self, RR, ZZ):
-        #Note maps should always use central grid dimensions as reference points!
+    def _make_mapping(self, RR=None, ZZ=None, copy=False):
+        #Note maps should always use central grid dimensions as reference points.
+        RR = self.RR if RR is None else RR
+        ZZ = self.ZZ if ZZ is None else ZZ #TODO: Pass self, RR, ZZ.
         return mpg.CoordinateMapping(self.nr, self.nz, self.dr, self.dz, RR, ZZ)
     
     def _findIndex(self, R, Z, show=False):
@@ -183,8 +186,8 @@ class StructuredPoloidalGrid(object):
     
     def generate_maps(self):
         Rfwd, Zfwd, Rbwd, Zbwd = self._trace_grid()
-        fwd_xtp, fwd_ztp = self._findIndex(Rfwd, Zfwd, show=True)
-        bwd_xtp, bwd_ztp = self._findIndex(Rbwd, Zbwd, show=True)
+        fwd_xtp, fwd_ztp = self._findIndex(Rfwd, Zfwd, show=False)
+        bwd_xtp, bwd_ztp = self._findIndex(Rbwd, Zbwd, show=False)
 
         #Need to do this all in 3D now, didn't need the complication before.
         #TODO: Does this match a meshgrid???
@@ -207,7 +210,7 @@ class StructuredPoloidalGrid(object):
         
         #Store metric info.
         #And work in 3D generally for stellarator/mirror cases.
-        coord_map_ctr = self._make_mapping(self.RR, self.ZZ)
+        coord_map_ctr = self._make_mapping()
         coord_map_fwd = self._make_mapping(Rfwd, Zfwd)
         coord_map_bwd = self._make_mapping(Rbwd, Zbwd)
 
@@ -258,6 +261,8 @@ class StructuredPoloidalGrid(object):
         metric.update({k: v*parFac**2 for k,v in metric.items() if k in ("g_22", "forward_g_22", "backward_g_22")})
 
         #Get finite volume operators for primary grid.
+        for key, value in coord_map_ctr.dagp_vars.items():
+            coord_map_ctr.dagp_vars[key] = self.make_3d(value)
         maps.update(coord_map_ctr.dagp_vars)
         
         #Calculate interpolation weights directly in python rather than BSTING.
@@ -299,8 +304,8 @@ class StructuredPoloidalGrid(object):
                                                         self.wall, direction=-self.field.dir)
 
             phi_dir, neg_phi_dir = ('+','-') if self.field.dir == 1 else ('-','+')
-            ax.plot(Rvals_pos, Zvals_pos, '.', color='red',  label='$+B_{\\phi} = ' + phi_dir     + '\\phi$')
-            ax.plot(Rvals_neg, Zvals_neg, '.', color='cyan', label='$-B_{\\phi} = ' + neg_phi_dir + '\\phi$')
+            ax.plot(Rvals_pos, Zvals_pos, '.', color='red',  label='$+\\hat{b}_{\\phi} = ' + phi_dir     + '\\hat{\\phi}$')
+            ax.plot(Rvals_neg, Zvals_neg, '.', color='cyan', label='$-\\hat{b}_{\\phi} = ' + neg_phi_dir + '\\hat{\\phi}$')
 
             #Get scatter point data to plot and test grid point following in general.
             print("Tracing field from small subset of gridpoints...")

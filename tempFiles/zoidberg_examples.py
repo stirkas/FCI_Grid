@@ -620,6 +620,7 @@ def plot_maps(field, grid, maps, yslice=0):
 
     
 if __name__ == '__main__':
-    main()
+    #main()
+    dommaschk(nx=20,ny=8,nz=20,C='W7-AS')
 
     
