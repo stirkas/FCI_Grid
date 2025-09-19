@@ -20,11 +20,11 @@ def write_output(gfilename, tok_grid: StructuredPoloidalGrid, tok_field: Magneti
     print("Writing to " + str(gridfile) + "...")
     with bdata.DataFile(gridfile, write=True, create=True, format="NETCDF4") as f:
         f.write_file_attribute("title", "BOUT++ grid file")
-        #f.write_file_attribute("software_name", "zoidberg")
-        #f.write_file_attribute("software_version", __version__)
-        #grid_id = str(uuid.uuid1())
-        #f.write_file_attribute("id", grid_id)      #Conventional name
-        #f.write_file_attribute("grid_id", grid_id) #BOUT++ specific name
+        f.write_file_attribute("software_name", "zoidberg")
+        f.write_file_attribute("software_version", __version__)
+        grid_id = str(uuid.uuid1())
+        f.write_file_attribute("id", grid_id)      #Conventional name
+        f.write_file_attribute("grid_id", grid_id) #BOUT++ specific name
 
         f.write("nx", tok_grid.nr)
         f.write("ny", tok_grid.nphi)
@@ -39,10 +39,8 @@ def write_output(gfilename, tok_grid: StructuredPoloidalGrid, tok_field: Magneti
 
         for key, value in metric.items():
             f.write(key, value)
-            dump_array_for_diff(f"{key}_" + "new", value)
 
         f.write("B", tok_grid.make_3d(tok_field.Bmag))
-        dump_array_for_diff("Bmag3D_" + "new", tok_grid.make_3d(tok_field.Bmag))
 
         f.write("pressure", tok_grid.make_3d(tok_field.pres))
 
@@ -51,7 +49,6 @@ def write_output(gfilename, tok_grid: StructuredPoloidalGrid, tok_field: Magneti
 
         for key, value in maps.items():
             f.write(key, value)
-            dump_array_for_diff(f"{key}_" + "new", value)
 
 def main(args):
     #Read eqdsk file.
