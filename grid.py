@@ -49,8 +49,8 @@ class StructuredPoloidalGrid(object):
         print("Generating wall boundary path...")
         self.wall = bdy.PolygonBoundary(eq_data.rlmt, eq_data.zlmt)
         #Also create ghost point boundary for final plotting.
-        self.ghst = bdy.PolygonBoundary([eq_data.rmin, eq_data.rmax, eq_data.rmax, eq_data.rmin, eq_data.rmin],
-                                        [eq_data.zmin, eq_data.zmin, eq_data.zmax, eq_data.zmax, eq_data.zmin])
+        self.ghst = bdy.PolygonBoundary([eq_data.rmin, eq_data.rmin, eq_data.rmax, eq_data.rmax, eq_data.rmin],
+                                        [eq_data.zmin, eq_data.zmax, eq_data.zmax, eq_data.zmin, eq_data.zmin])
 
         #Handle toroidal direction.
         self.phi  = 0.0
@@ -96,22 +96,22 @@ class StructuredPoloidalGrid(object):
         #Remove points outside the wall. Not enough to remove all non-important points it turns out.
         #TODO: Can try removing points within certain flux surface outside of LCFS?
         # |--->  Probably use psi spline from R,Z to drop points a bit outside LCFS.
-        for points in opoints[:]:
-            if not self.wall.contains(points[0], points[1]):
-                opoints.remove(points)
-        for points in xpoints[:]:
-            if not self.wall.contains(points[0], points[1]):
-                xpoints.remove(points)
+        for point in opoints[:]:
+            if not self.wall.contains(point[0], point[1]):
+                opoints.remove(point)
+        for point in xpoints[:]:
+            if not self.wall.contains(point[0], point[1]):
+                xpoints.remove(point)
 
         return xpoints, opoints
 
     def _make_mapping(self, RR=None, ZZ=None, copy=False):
         #Note maps should always use central grid dimensions as reference points.
         RR = self.RR if RR is None else RR
-        ZZ = self.ZZ if ZZ is None else ZZ #TODO: Pass self, RR, ZZ.
+        ZZ = self.ZZ if ZZ is None else ZZ #TODO: Pass self, RR, ZZ. But thats a cyclic dep.
         return mpg.CoordinateMapping(self.nr, self.nz, self.dr, self.dz, RR, ZZ)
     
-    def _findIndex(self, R, Z, show=False):
+    def _find_index(self, R, Z, show=False):
         """
         Finds the (x,z) index corresponding to the given (R,Z) coordinate.
 
@@ -125,28 +125,22 @@ class StructuredPoloidalGrid(object):
         x, z : (ndarray, ndarray)
             Index as a float, same shape as R,Z.
         """
-        # Make sure inputs are NumPy arrays
-        R = np.asarray(R)
-        Z = np.asarray(Z)
-
         xind = (R - self.R[0])/self.dR
         zind = (Z - self.Z[0])/self.dZ
 
         #Mask out points around boundary.
         inside = self.wall.contains(R,Z)
-        inside = inside.reshape((R.shape[0], R.shape[1])) #TODO: Create function to return mask with same dimensions?
-
         xind[~inside] = self.nr
-        zind[~inside] = self.nz #TODO: Double check this in BOUT. Maybe helps with boundary issues. Should be +1 for x and z like seps though???
+        zind[~inside] = self.nz
     
         if (show):
             fig, ax = plt.subplots(figsize=(6,6))
 
-            # 1) draw the wall Path itself
+            #1) Draw the wall Path itself.
             patch = PathPatch(self.wall.path, facecolor='none', edgecolor='k', lw=2)
             ax.add_patch(patch)
 
-            # 2) scatter the points inside (green) and outside (red)
+            #2) Scatter the points inside (green) and outside (red).
             ax.scatter(
                 R[inside], Z[inside],
                 s=10, c='g', marker='o', label='inside', alpha=0.6
@@ -185,9 +179,10 @@ class StructuredPoloidalGrid(object):
         return Rfwd, Zfwd, Rbwd, Zbwd
     
     def generate_maps(self):
+        print("Generating metric and map data for output file...")
         Rfwd, Zfwd, Rbwd, Zbwd = self._trace_grid()
-        fwd_xtp, fwd_ztp = self._findIndex(Rfwd, Zfwd, show=False)
-        bwd_xtp, bwd_ztp = self._findIndex(Rbwd, Zbwd, show=False)
+        fwd_xtp, fwd_ztp = self._find_index(Rfwd, Zfwd, show=utils.DEBUG_FLAG)
+        bwd_xtp, bwd_ztp = self._find_index(Rbwd, Zbwd, show=utils.DEBUG_FLAG)
 
         #Need to do this all in 3D now, didn't need the complication before.
         #TODO: Does this match a meshgrid???
@@ -205,11 +200,9 @@ class StructuredPoloidalGrid(object):
             "forward_xt_prime":  self.make_3d(fwd_xtp),
             "forward_zt_prime":  self.make_3d(fwd_ztp),
             "backward_xt_prime": self.make_3d(bwd_xtp),
-            "backward_zt_prime": self.make_3d(bwd_ztp)
-        }
+            "backward_zt_prime": self.make_3d(bwd_ztp)}
         
-        #Store metric info.
-        #And work in 3D generally for stellarator/mirror cases.
+        #Store metric info. Store everything in 3D.
         coord_map_ctr = self._make_mapping()
         coord_map_fwd = self._make_mapping(Rfwd, Zfwd)
         coord_map_bwd = self._make_mapping(Rbwd, Zbwd)
@@ -230,7 +223,9 @@ class StructuredPoloidalGrid(object):
             "g22":  1/R3**2,
             "g_22": R3**2,
             "g33":  self.make_3d(coord_map_ctr.metric["gzz"]),
-            "g_33": self.make_3d(coord_map_ctr.metric["g_zz"]),
+            "g_33": self.make_3d(coord_map_ctr.metric["g_zz"])}
+        
+        metric.update({
             "forward_dx":    np.full_like(R3, coord_map_fwd.metric["dx"]),
             "forward_dy":    np.full_like(R3, self.dphi),
             "forward_dz":    np.full_like(R3, coord_map_fwd.metric["dz"]),
@@ -241,7 +236,9 @@ class StructuredPoloidalGrid(object):
             "forward_g22":   1/R3**2,
             "forward_g_22":  R3**2,
             "forward_g33":   self.make_3d(coord_map_fwd.metric["gzz"]),
-            "forward_g_33":  self.make_3d(coord_map_fwd.metric["g_zz"]),
+            "forward_g_33":  self.make_3d(coord_map_fwd.metric["g_zz"])})
+
+        metric.update({
             "backward_dx":   np.full_like(R3, coord_map_bwd.metric["dx"]),
             "backward_dy":   np.full_like(R3, self.dphi),
             "backward_dz":   np.full_like(R3, coord_map_bwd.metric["dz"]),
@@ -252,8 +249,7 @@ class StructuredPoloidalGrid(object):
             "backward_g22":  1/R3**2,
             "backward_g_22": R3**2,
             "backward_g33":  self.make_3d(coord_map_bwd.metric["gzz"]),
-            "backward_g_33": self.make_3d(coord_map_bwd.metric["g_zz"])
-        }
+            "backward_g_33": self.make_3d(coord_map_bwd.metric["g_zz"])})
 
         #Update gyy's with field line following factors for parallel operators, since this is handled along field lines.
         parFac = Bmag3D/Bphi3D
@@ -271,7 +267,7 @@ class StructuredPoloidalGrid(object):
 
         return maps, metric
 
-    def plotConfig(self, psi, maps, checkPts=True):
+    def plotConfig(self, psi, maps):
         print("Plotting equilibrium configuration...")
         fig, ax = plt.subplots(figsize=(8,10))
         cf = ax.contourf(self.R, self.Z, psi.T, levels=100, cmap='viridis')
@@ -287,32 +283,28 @@ class StructuredPoloidalGrid(object):
         ax.add_patch(ghost)
         ax.add_patch(sptx)
 
-        #Test field line tracing on plots.
-        if (checkPts):
-            print("Running field line following tests for plotting...")
-            #Use minor radial offset from separatrix.
-            offset = 0.005
-            rsep, zsep = self.sptx.path.vertices[:,0], self.sptx.path.vertices[:,1]
-            R1, Z1     = rsep[self.sep_idx] + offset, zsep[self.sep_idx]
+        #Trace field lines in both directions.
+        offset = 0.005 #Use minor radial offset from separatrix.
+        rsep, zsep = self.sptx.path.vertices[:,0], self.sptx.path.vertices[:,1]
+        R1, Z1     = rsep[self.sep_idx] + offset, zsep[self.sep_idx]
+        print(f"Tracing field line to wall in forward direction from {R1,Z1}...")
+        Rvals_pos, Zvals_pos = self.field.trace_until_wall(R1, Z1, self.phi, self.dphi,
+                                                    self.wall, direction=self.field.dir)
+        print(f"Tracing field line to wall in backward direction from {R1,Z1}...")
+        Rvals_neg, Zvals_neg = self.field.trace_until_wall(R1, Z1, self.phi, self.dphi,
+                                                    self.wall, direction=-self.field.dir)
+        phi_dir, neg_phi_dir = ('+','-') if self.field.dir == 1 else ('-','+')
+        ax.plot(Rvals_pos, Zvals_pos, '.', color='red',  label='$+\\hat{b}_{\\phi} = ' + phi_dir     + '\\hat{\\phi}$')
+        ax.plot(Rvals_neg, Zvals_neg, '.', color='cyan', label='$-\\hat{b}_{\\phi} = ' + neg_phi_dir + '\\hat{\\phi}$')
 
-            #Trace field lines in both directions.
-            print(f"Tracing field line to wall in forward direction from {R1,Z1}...")
-            Rvals_pos, Zvals_pos = self.field.trace_until_wall(R1, Z1, self.phi, self.dphi,
-                                                        self.wall, direction=self.field.dir)
-            print(f"Tracing field line to wall in backward direction from {R1,Z1}...")
-            Rvals_neg, Zvals_neg = self.field.trace_until_wall(R1, Z1, self.phi, self.dphi,
-                                                        self.wall, direction=-self.field.dir)
-
-            phi_dir, neg_phi_dir = ('+','-') if self.field.dir == 1 else ('-','+')
-            ax.plot(Rvals_pos, Zvals_pos, '.', color='red',  label='$+\\hat{b}_{\\phi} = ' + phi_dir     + '\\hat{\\phi}$')
-            ax.plot(Rvals_neg, Zvals_neg, '.', color='cyan', label='$-\\hat{b}_{\\phi} = ' + neg_phi_dir + '\\hat{\\phi}$')
-
+        #Test field line tracing on grid.
+        if (utils.DEBUG_FLAG):
+            print("Testing field line following on gridpoints...")
             #Get scatter point data to plot and test grid point following in general.
-            print("Tracing field from small subset of gridpoints...")
             gridPts = np.column_stack((self.RR.ravel(), self.ZZ.ravel()))
             fwdPts  = np.column_stack((maps["forward_R"].ravel(),  maps["forward_Z"].ravel()))
             bwdPts  = np.column_stack((maps["backward_R"].ravel(), maps["backward_Z"].ravel()))
-            step    = 100
+            step    = gridPts.shape[0]//100 #Divide grid into 100 equally spaced points.
             indices = np.arange(0, gridPts.shape[0], step)
             gridPts = gridPts[indices]
             fwdPts  = fwdPts[indices]

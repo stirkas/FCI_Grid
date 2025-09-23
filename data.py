@@ -62,7 +62,7 @@ class TokamakData():
         self.psin      = (self.psi-self.paxis)/(self.pbdry-self.paxis) #psinorm
         self.psi_func  = interpolate.RectBivariateSpline(self.r, self.z, self.psi)
         self.psin_func = interpolate.RectBivariateSpline(self.r, self.z, self.psin)
-        
+
         #Toroidal field component and q(psi).
         self.psi1D = np.linspace(self.paxis, self.pbdry, self.nr)
         #psi1D = np.linspace(pbdry, paxis, nrg) #TODO: For TCV it seems r is backwards??? Different cocos convention?

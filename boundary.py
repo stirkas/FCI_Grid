@@ -44,7 +44,7 @@ class PolygonBoundary:
         self._dd = np.sum(self._d*self._d, axis=1)     #Segment lengths
         self._n = self._d / np.sqrt(self._dd)[:, None] #Segment unit vectors
 
-    def _clean_up_points(self, rpts: NDArray[np.floating], zpts: NDArray[np.floating], *, abs_tol: float
+    def _clean_up_points(self, rpts: NDArray[np.floating], zpts: NDArray[np.floating], abs_tol: float
                     ) -> Tuple[NDArray[np.floating], NDArray[np.floating]]:
         """
         Ensure closure, drop zero-length segments, and drop redundant middle points
@@ -84,10 +84,17 @@ class PolygonBoundary:
         return Path(verts, codes)
 
     def contains(self, rpts, zpts) -> NDArray[np.bool_]:
-        """Vectorized point-in-polygon check with an inside bias."""
-        rpts, zpts = np.asarray(rpts), np.asarray(zpts)
-        pts = np.column_stack([rpts.ravel(), zpts.ravel()])
-        return self.path.contains_points(pts, radius=float(self.tol.path_edge_in_bias))
+        """
+        Vectorized point-in-polygon check with an inside bias.
+        Works with any dimensional set of points.
+        """
+        #Broadcast to a common shape. Raises if shapes incompatible.
+        rb, zb = np.broadcast_arrays(rpts, zpts)
+        pts    = np.column_stack([rb.ravel(), zb.ravel()])
+        inside = self.path.contains_points(pts, radius=float(self.tol.path_edge_in_bias))
+        inside = inside.reshape(rb.shape)
+        #Return 0-D ndarray for scalars which is truth-y; return mask array for higher dims.
+        return inside.item() if inside.ndim == 0 else inside
 
     def _vertex_bisector(self, Rb, Zb, j):
         """Return angle bisector to image point given boundary points."""
@@ -171,8 +178,8 @@ class PolygonBoundary:
         """
         Generate mask of ghost points from wall and 2D gridpoint arrays.
         """
+        print("Generating ghost cells and boundary conditions...")
         inside = self.contains(rpts, zpts)
-        inside = inside.reshape(rpts.shape)
         neighbors_in = utils.neighbor_mask(inside)
         ghost_mask = (~inside) & neighbors_in
 

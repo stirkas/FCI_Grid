@@ -1,8 +1,10 @@
 from __future__ import annotations #Only import when needed.
+import os, sys
+
 from dataclasses import dataclass, field
 from enum import IntEnum
+from pathlib import Path
 from typing import ClassVar, Mapping, TextIO, TypeAlias, Union
-import os, sys
 
 import numpy as np
 
@@ -48,8 +50,6 @@ def neighbor_mask(point_mask, connectivity=4):
 
     return neighbor_any
 
-#TODO: Update to use python logging and warning classes?
-#TODO: Clean up the logger that ChatGPT created...
 class Logger:
     __slots__ = ("min_level", "stream", "force_color", "palette")
     
@@ -132,6 +132,7 @@ class Tolerances:
     #Not a field: class-level constant
     DEFAULT_CLOSED_PATH_TOL: ClassVar[float] = 0.0
 
+    #TODO: Add checks that tolerances are reasonable if manually created?
     path_tol:        float = 1e-12
     path_angle_tol:  float = 1e-12
     closed_path_tol: float = DEFAULT_CLOSED_PATH_TOL #For testing path is closed.
@@ -146,11 +147,19 @@ class Tolerances:
             raise ValueError("path_tol must be ≥ 0")
         if self.path_angle_tol < 0:
             raise ValueError("path_angle_tol must be ≥ 0")
+        if self.path_edge_in_bias >= 0:
+            raise ValueError("path_edge_in_bias should be negative to bias points inside.")
         
         if self.closed_path_tol == self.DEFAULT_CLOSED_PATH_TOL:
             logger.warn(f"Using tol of {self.closed_path_tol:f} to check paths are closed. "
                 "This is usually fine for gfiles.")
 
 #Define some useful globals.
+GFILE_DIR = Path("TokData")
+DEFAULT_GFILE = GFILE_DIR / "DIIID" / "g162940.02944_670"
+DEFAULT_NR = 64
+DEFAULT_NZ = 64
+DEFAULT_NPHI = 16
+DEBUG_FLAG = False
 logger = Logger(min_level="info", stream=sys.stdout)
 DEFAULT_TOL = Tolerances()

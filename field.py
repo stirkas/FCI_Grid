@@ -7,7 +7,8 @@ from grid import StructuredPoloidalGrid
 #Generate magnetic field on the given grid from the equilibrium data.
 class MagneticField(object): #TODO: How best to derive from general base class?
     def __init__(self, eqb: TokamakData, grd: StructuredPoloidalGrid):
-        self.Bp_R =  eqb.sign_ip*eqb.psi_func(grd.R, grd.Z, dy=1)/grd.RR
+        self.psi  = eqb.psi_func(grd.R, grd.Z)
+        self.Bp_R = eqb.sign_ip*eqb.psi_func(grd.R, grd.Z, dy=1)/grd.RR
         self.Bp_Z = -eqb.sign_ip*eqb.psi_func(grd.R, grd.Z, dx=1)/grd.RR
         self.Bphi = eqb.f_spl(eqb.psi_func(grd.R, grd.Z))/grd.RR
         self.Bp   = np.sqrt(self.Bp_R**2 + self.Bp_Z**2)

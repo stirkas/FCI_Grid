@@ -3,11 +3,11 @@ from scipy import interpolate
 
 class CoordinateMapping(object):
     """Represents a coordinate mapping from cartesian R,Z to normalized x,z coordinates."""
-    def __init__(self, nr, nz, dr, dz, RR, ZZ):
+    def __init__(self, nx, nz, dx, dz, RR, ZZ):
         #TODO: Dont need to pass all this in? But dont need to duplicate logic to create these?
-        self.nx = nr
+        self.nx = nx
         self.nz = nz
-        self.dx = dr
+        self.dx = dx
         self.dz = dz
         self.RR = RR
         self.ZZ = ZZ
@@ -26,7 +26,7 @@ class CoordinateMapping(object):
         #So call from outside or do outside from metric?
         self.dagp_vars = self._create_dagp()
 
-    def _get_coordinate(self, dx=0, dz=0):
+    def _get_coordinates(self, dx=0, dz=0):
         #TODO: Is it ok now that nx != nz? zoidberg had lots of asserts.
         """Get coordinates (R, Z) at given (xind, zind) index
 
@@ -43,8 +43,8 @@ class CoordinateMapping(object):
             Locations of point or derivatives of R,Z with respect to
             indices if dx,dz != 0
         """
-        R = self.spl_x(self.xxinds, self.zzinds, dx=dx, dy=dz, grid=False)
-        Z = self.spl_z(self.xxinds, self.zzinds, dx=dx, dy=dz, grid=False)
+        R = self.spl_x(self.xinds, self.zinds, dx=dx, dy=dz, grid=True)
+        Z = self.spl_z(self.xinds, self.zinds, dx=dx, dy=dz, grid=True)
 
         return np.asarray(R), np.asarray(Z)
 
@@ -61,8 +61,8 @@ class CoordinateMapping(object):
 
         """
         #Differentials of (R,Z) when stepping in computational directions (r,z)
-        dR_dx, dZ_dx = self._get_coordinate(dx=1, dz=0) #∆X when stepping in +r
-        dR_dz, dZ_dz = self._get_coordinate(dx=0, dz=1) #∆X when stepping in +z
+        dR_dx, dZ_dx = self._get_coordinates(dx=1, dz=0) #∆X when stepping in +r
+        dR_dz, dZ_dz = self._get_coordinates(dx=0, dz=1) #∆X when stepping in +z
         #Convert differentials to partial derivatives.
         parR_x = dR_dx/self.dx
         parZ_x = dZ_dx/self.dx
