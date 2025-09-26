@@ -14,6 +14,7 @@ from grid import StructuredPoloidalGrid
 from field import MagneticField
 from fci_parser import ArgParser #TODO: parser taken by std lib, pick better name?
 import utils
+import weights
 
 #TODO:Add unit tests to make sure functionality is reasonable? Convert to classes with type hints, type checks, and header comments?
 
@@ -67,12 +68,14 @@ def main(args):
     tok_field = MagneticField(tokData, tok_grid)
     tok_grid.attach_field(tok_field) #Get around circular import...
 
-    #Generate ghost point mask and BC information.
-    #TODO: Add parallel BCs as well based on traced points from above.
-    ghosts = tok_grid.wall.handle_bounds(tok_grid.RR, tok_grid.ZZ, show=utils.DEBUG_FLAG)
-
     #Generate metric and maps and so on to write out for BSTING.
     maps, metrics = tok_grid.generate_maps()
+
+    #Generate ghost point mask and BC information. Includes 2d perp interp weights.
+    bounds = tok_grid.generate_bounds()
+    #Generate parallel weights. TODO: Not used by BOUT++ yet. What does it do?
+    par_wghts = weights.calc_par_weights(maps)
+
     psi = tok_field.psi
     attributes = {
         "psi": tok_grid.make_3d(psi)
@@ -85,4 +88,5 @@ def main(args):
 
 if __name__ == "__main__":
     args = ArgParser().parse()
+    args.debug = True
     main(args)

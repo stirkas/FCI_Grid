@@ -12,6 +12,7 @@ from hypnotoad.utils.critical import find_critical as fc
 import boundary as bdy
 import mapping as mpg
 import utils
+import weights
 
 class StructuredPoloidalGrid(object):
     """Represents a structured poloidal grid in R,phi,Z."""
@@ -108,10 +109,23 @@ class StructuredPoloidalGrid(object):
     def _make_mapping(self, RR=None, ZZ=None, copy=False):
         #Note maps should always use central grid dimensions as reference points.
         RR = self.RR if RR is None else RR
-        ZZ = self.ZZ if ZZ is None else ZZ #TODO: Pass self, RR, ZZ. But thats a cyclic dep.
+        ZZ = self.ZZ if ZZ is None else ZZ
+
+        #TODO: Pass self, RR, ZZ. But thats a cyclic dep. Can make a small grid info dataclass.
         return mpg.CoordinateMapping(self.nr, self.nz, self.dr, self.dz, RR, ZZ)
     
-    def _find_index(self, R, Z, show=False):
+    def _find_grid_index(self, mask):
+        """
+        Finds the (x,z) index corresponding to the point on the grid from a given mask
+        of points to consider.
+        """
+        flat_mask  = mask.ravel(order="C") #Row major flattening for BOUT++.
+        ghost_lin  = np.flatnonzero(flat_mask)
+        indx, indz = np.unravel_index(ghost_lin, self.RR.shape, order="C")
+
+        return indx, indz
+
+    def _find_index(self, R, Z, bound=True, show=False):
         """
         Finds the (x,z) index corresponding to the given (R,Z) coordinate.
 
@@ -130,9 +144,10 @@ class StructuredPoloidalGrid(object):
 
         #Mask out points around boundary.
         inside = self.wall.contains(R,Z)
-        xind[~inside] = self.nr
-        zind[~inside] = self.nz
-    
+        if (bound):
+            xind[~inside] = self.nr
+            zind[~inside] = self.nz
+
         if (show):
             fig, ax = plt.subplots(figsize=(6,6))
 
@@ -141,21 +156,17 @@ class StructuredPoloidalGrid(object):
             ax.add_patch(patch)
 
             #2) Scatter the points inside (green) and outside (red).
-            ax.scatter(
-                R[inside], Z[inside],
-                s=10, c='g', marker='o', label='inside', alpha=0.6
-            )
-            ax.scatter(
-                R[~inside], Z[~inside],
-                s=10, c='r', marker='x', label='outside', alpha=0.6
-            )
+            ax.scatter(R[inside], Z[inside], s=10, c='g',
+                    marker='o', label='inside', alpha=0.6)
+            ax.scatter(R[~inside], Z[~inside], s=10, c='r',
+                    marker='x', label='outside', alpha=0.6)
 
             ax.set_aspect('equal', 'box')
             ax.set_xlabel('x')
             ax.set_ylabel('z')
             ax.legend(loc='upper right')
             plt.show()
-            
+        
         return xind, zind
     
     def _trace_grid(self):
@@ -178,6 +189,35 @@ class StructuredPoloidalGrid(object):
 
         return Rfwd, Zfwd, Rbwd, Zbwd
     
+    def generate_bounds(self):
+        print("Generating ghost cell image points and boundary data...")
+        #TODO: Create a vector data class for points. Use inside get_image_pts. Dont stack out. Define length/unit functions in dataclass.
+        in_mask, ghost_mask, (Rg, Zg), (Rb, Zb), (Ri, Zi), (Rn, Zn) = self.wall.get_image_pts(self.RR, self.ZZ, show=utils.DEBUG_FLAG)
+
+        #Get indices for ghost and image points required for interpolation.
+        indx_g, indz_g = self._find_grid_index(ghost_mask)
+        #TODO: Image points should always be inside. But edge cases may not be currently. Can eventually remove flag.
+        indx_i, indz_i = self._find_index(Ri, Zi, bound=False)
+
+        wghts, num_wghts = weights.calc_perp_weights(indx_i, indz_i)
+
+        #TODO: Does writing this to netcdf work ok with dimensions?
+        bounds = {
+            "in_mask":    self.make_3d(in_mask),
+            "ghost_mask": self.make_3d(ghost_mask),
+            "ng":         Rg.size,
+            "ghost_pts":  np.stack([Rg, Zg], axis=-1),
+            "bound_pts":  np.stack([Rb, Zb], axis=-1),
+            "image_pts":  np.stack([Ri, Zi], axis=-1),
+            "normal":     np.stack([Rn, Zn], axis=-1),
+            "ghost_inds": np.stack([indx_g, indz_g], axis=-1),
+            "image_inds": np.stack([indx_i, indz_i], axis=-1),
+            "nw":         num_wghts,
+            "weights":    wghts}
+
+        return bounds
+
+
     def generate_maps(self):
         print("Generating metric and map data for output file...")
         Rfwd, Zfwd, Rbwd, Zbwd = self._trace_grid()
@@ -185,8 +225,6 @@ class StructuredPoloidalGrid(object):
         bwd_xtp, bwd_ztp = self._find_index(Rbwd, Zbwd, show=utils.DEBUG_FLAG)
 
         #Need to do this all in 3D now, didn't need the complication before.
-        #TODO: Does this match a meshgrid???
-        #R3, phi3, Z3 = np.meshgrid(self.R, self.phi_arr, self.Z, indexing='ij')
         R3, Z3 = self.make_3d(self.RR), self.make_3d(self.ZZ)
         maps = {
             "R": R3,
@@ -269,7 +307,7 @@ class StructuredPoloidalGrid(object):
 
     def plotConfig(self, psi, maps):
         print("Plotting equilibrium configuration...")
-        fig, ax = plt.subplots(figsize=(8,10))
+        fig, ax = plt.subplots(figsize=(8,10)) #TODO: Base figsize on eqbm dimensions?
         cf = ax.contourf(self.R, self.Z, psi.T, levels=100, cmap='viridis')
         plt.colorbar(cf, ax=ax)
 

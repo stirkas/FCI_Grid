@@ -14,8 +14,7 @@ class ArgParser():
         p.add_argument("--debug", action=argparse.BooleanOptionalAction,
                 default=False, help="Enable debug logging and plotting.")
         p.add_argument("--gfile", type=str, default=str(utils.DEFAULT_GFILE),
-                help=(f"EQDSK file name, must be inside \"{utils.GFILE_DIR}\" directory. "\
-                       "Examples: 'DIIID/g174791.03000', 'TCV/65402_t1.eqdsk'."))
+                help=(f"EQDSK file name. Examples: 'TokData/DIIID/g174791.03000', 'TokData/TCV/65402_t1.eqdsk'."))
 
         p.add_argument("--nr",   type=int, default=utils.DEFAULT_NR,   help="Horizontal gridpoints (R).")
         p.add_argument("--nphi", type=int, default=utils.DEFAULT_NPHI, help="Toroidal gridpoints (phi).")
@@ -39,9 +38,8 @@ class ArgParser():
 
     #Function to test gfile valid.
     def _gfile_valid(self, gfile: str) -> Path:
-        base = Path(utils.GFILE_DIR).resolve()
         gpath = Path(gfile).resolve(strict=False) #Don't require existence yet.
-        if not gpath.is_file() or not gpath.is_relative_to(base):
+        if not gpath.is_file():
             raise SystemExit(f"Error: gfile not found: {gpath}")
         return gpath
 
