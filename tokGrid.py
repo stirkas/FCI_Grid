@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 
 from boututils import datafile as bdata
-from hypnotoad import __version__
+from hypnotoad import __version__ #TODO: Dont depend on hypnotoad.
 
 from data import TokamakData
 from grid import StructuredPoloidalGrid
@@ -72,9 +72,9 @@ def main(args):
     maps, metrics = tok_grid.generate_maps()
 
     #Generate ghost point mask and BC information. Includes 2d perp interp weights.
-    bounds = tok_grid.generate_bounds()
-    #Generate parallel weights. TODO: Not used by BOUT++ yet. What does it do?
-    par_wghts = weights.calc_par_weights(maps)
+    tok_grid.generate_bounds(maps)
+    #Generate parallel weights. TODO: Not used by BOUT++ yet. Uses hermite-spline interp by default.
+    #par_wghts = weights.calc_par_weights(maps)
 
     psi = tok_field.psi
     attributes = {
@@ -88,5 +88,4 @@ def main(args):
 
 if __name__ == "__main__":
     args = ArgParser().parse()
-    args.debug = True
     main(args)

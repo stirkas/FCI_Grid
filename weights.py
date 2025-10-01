@@ -221,16 +221,18 @@ def calc_par_weights(maps):
         "backward_rows": backward["rows"],
     }
 
-def calc_perp_weights(xinds, zinds, dx, dz):
+def calc_perp_weights(xinds, zinds, in_mask):
     """
     Compute bilinear weights for fractional *index-space* coords (xf, zf).
     Used for ghost cells primarily which only have thin layer so force bilinear.
-    Note, index-space means 
+    Note, this is equivalent to the Vandermonde solve used in immersed boundary papers (Gheis, Mittal).
 
     Inputs
     ------
-    xf, zf : array-like, shape (N,) or scalars
+    xinds, zinds : array-like, shape (N,) or scalars
         Floating-point indices in grid index units (0..nx-1, 0..nz-1).
+    in_mask : True if point is inside wall. Needed to check if nearest
+        points are inside or not for calculating weights.
 
     Returns
     -------
@@ -255,5 +257,9 @@ def calc_perp_weights(xinds, zinds, dx, dz):
     w01 = (1-s)*t     # (i0,   j0+1)
     w11 = s*t         # (i0+1, j0+1)
 
-    w = np.stack([w00, w10, w01, w11], axis=-1)
-    return w, w.shape[-1]
+    in00, in01, in10, in11 = in_mask[x0, z0], in_mask[x0, z0+1], \
+                             in_mask[x0+1, z0], in_mask[x0+1, z0+1]
+
+    w = np.stack([w00, w01, w10, w11], axis=-1)
+    w_in = np.stack([in00, in01, in10, in11], axis=-1)
+    return w, w_in, w.shape[-1]

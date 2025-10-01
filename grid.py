@@ -7,6 +7,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib.patches import PathPatch
 
+#TODO: Use freegs? Where hypnotoad gets it from initially. Or write own pythonically (cough cough chatGPT).
 from hypnotoad.utils.critical import find_critical as fc
 
 import boundary as bdy
@@ -139,13 +140,26 @@ class StructuredPoloidalGrid(object):
         x, z : (ndarray, ndarray)
             Index as a float, same shape as R,Z.
         """
-        xind = (R - self.R[0])/self.dR
+        if bound == False:
+            utils.logger.warn("Assuming image points possibly outside bounds...need to deal with complex boundaries to remove this flag.")
+
+        rind = (R - self.R[0])/self.dR
         zind = (Z - self.Z[0])/self.dZ
 
-        #Mask out points around boundary.
+        #If original points were grid points need to round/snap due to floating point...
+        ri, zi = np.rint(rind), np.rint(zind) #Nearest integer
+        round_r = np.isclose(rind, ri, atol=utils.DEFAULT_TOL.path_tol, rtol=0.0)
+        round_z = np.isclose(zind, zi, atol=utils.DEFAULT_TOL.path_tol, rtol=0.0)
+
+        #Take snapped value when isclose True.
+        rind = np.where(round_r, ri, rind)
+        zind = np.where(round_z, zi, zind)
+
+        #Mask out points around boundary. How parallel bounds are handled but not perp...
+        #TODO: Find way around needing bound flag?
         inside = self.wall.contains(R,Z)
         if (bound):
-            xind[~inside] = self.nr
+            rind[~inside] = self.nr
             zind[~inside] = self.nz
 
         if (show):
@@ -167,7 +181,7 @@ class StructuredPoloidalGrid(object):
             ax.legend(loc='upper right')
             plt.show()
         
-        return xind, zind
+        return rind, zind
     
     def _trace_grid(self):
         print("Generating forward and backward points on whole grid...")
@@ -189,34 +203,34 @@ class StructuredPoloidalGrid(object):
 
         return Rfwd, Zfwd, Rbwd, Zbwd
     
-    def generate_bounds(self):
+    def generate_bounds(self, maps):
         print("Generating ghost cell image points and boundary data...")
-        #TODO: Create a vector data class for points. Use inside get_image_pts. Dont stack out. Define length/unit functions in dataclass.
-        in_mask, ghost_mask, (Rg, Zg), (Rb, Zb), (Ri, Zi), (Rn, Zn) = self.wall.get_image_pts(self.RR, self.ZZ, show=utils.DEBUG_FLAG)
+        #TODO: Create a vector data class for points. Use inside get_image_pts.
+        #Dont stack out. Define length/unit functions in dataclass.
+        in_mask, ghost_mask, (Rg, Zg), (Rb, Zb), (Ri, Zi), (Rn, Zn) \
+            = self.wall.get_image_pts(self.RR, self.ZZ, show=utils.DEBUG_FLAG)
 
-        #Get indices for ghost and image points required for interpolation.
-        indx_g, indz_g = self._find_grid_index(ghost_mask)
-        #TODO: Image points should always be inside. But edge cases may not be currently. Can eventually remove flag.
-        indx_i, indz_i = self._find_index(Ri, Zi, bound=False)
+        #Get indices required for interpolation.
+        indr_i, indz_i = self._find_index(Ri, Zi, bound=False)
 
-        wghts, num_wghts = weights.calc_perp_weights(indx_i, indz_i)
+        #Use cell numbers to map to ghost array.
+        ghost_lin = np.flatnonzero(ghost_mask.ravel(order="C"))
+        ghost_id  = np.full(ghost_mask.shape, -1)
+        ghost_id.ravel(order="C")[ghost_lin] = np.arange(ghost_lin.size)
 
-        #TODO: Does writing this to netcdf work ok with dimensions?
-        bounds = {
-            "in_mask":    self.make_3d(in_mask),
-            "ghost_mask": self.make_3d(ghost_mask),
+        wghts, wghts_in, num_wghts = weights.calc_perp_weights(indr_i, indz_i, in_mask)
+
+        maps.update({
+            "in_mask":    self.make_3d(in_mask).astype(np.uint8),
+            "ghost_id":   self.make_3d(ghost_id),
             "ng":         Rg.size,
             "ghost_pts":  np.stack([Rg, Zg], axis=-1),
             "bound_pts":  np.stack([Rb, Zb], axis=-1),
             "image_pts":  np.stack([Ri, Zi], axis=-1),
-            "normal":     np.stack([Rn, Zn], axis=-1),
-            "ghost_inds": np.stack([indx_g, indz_g], axis=-1),
-            "image_inds": np.stack([indx_i, indz_i], axis=-1),
+            "normals":    np.stack([Rn, Zn], axis=-1),
             "nw":         num_wghts,
-            "weights":    wghts}
-
-        return bounds
-
+            "is_fluid":   wghts_in.astype(np.uint8),
+            "weights":    wghts})
 
     def generate_maps(self):
         print("Generating metric and map data for output file...")
@@ -308,7 +322,7 @@ class StructuredPoloidalGrid(object):
     def plotConfig(self, psi, maps):
         print("Plotting equilibrium configuration...")
         fig, ax = plt.subplots(figsize=(8,10)) #TODO: Base figsize on eqbm dimensions?
-        cf = ax.contourf(self.R, self.Z, psi.T, levels=100, cmap='viridis')
+        cf = ax.contour(self.R, self.Z, psi.T, levels=100, cmap='viridis')
         plt.colorbar(cf, ax=ax)
 
         #Plot various boundaries.

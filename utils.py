@@ -134,7 +134,7 @@ class Tolerances:
     DEFAULT_CLOSED_PATH_TOL: ClassVar[float] = 0.0
 
     #TODO: Add checks that tolerances are reasonable if manually created?
-    path_tol:        float = 1e-12
+    path_tol:        float = 1e-12 #TODO: Rename to grid tol? Basically what it is assuming paths on grid points.
     path_angle_tol:  float = 1e-12
     closed_path_tol: float = DEFAULT_CLOSED_PATH_TOL #For testing path is closed.
     path_edge_in_bias: float | None = field(default=None) #Use to bias points on wall to inside.

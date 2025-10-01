@@ -45,6 +45,33 @@ class PolygonBoundary:
         self._dd = np.sum(self._d*self._d, axis=1)     #Segment lengths
         self._n = self._d / np.sqrt(self._dd)[:, None] #Segment unit vectors
 
+    def _remove_target_pts(self, R, Z, tol=1e-2):
+        #Note: Manual points from default gfile...
+        targets = np.array([
+            (1.0011,  1.2172),
+            (1.0285,  1.2172),
+            (1.2802,  1.3318),
+            (1.2802,  1.3484),
+            (1.4191,  1.3484),
+            (1.4191,  1.3100),
+            (1.3730,  1.3100),
+            (2.3770,  0.3890),
+            (2.3770, -0.3890),
+            (1.3716, -1.3289),
+            (1.4206, -1.3289),
+            (1.4203, -1.3626),
+            (1.1533, -1.3626)])
+
+        pts = np.column_stack([R, Z])
+        remove = np.zeros(len(pts), dtype=bool)
+        for rt, zt in targets:
+            d2 = (pts[:,0]-rt)**2 + (pts[:,1]-zt)**2
+            j = np.argmin(d2)
+            if d2[j] <= tol**2:
+                remove[j] = True
+        kept = pts[~remove]
+        return kept[:,0], kept[:,1]
+
     def _clean_up_points(self, rpts: NDArray[np.floating], zpts: NDArray[np.floating], abs_tol: float
                     ) -> Tuple[NDArray[np.floating], NDArray[np.floating]]:
         """
@@ -72,6 +99,9 @@ class PolygonBoundary:
         drop_mid = np.concatenate([[False], drop_mid_r | drop_mid_z, [False]])
         keep = ~drop_mid
         rpts, zpts = rpts[keep], zpts[keep]
+
+        #TODO: Remove and reset angle bisection...
+        rpts, zpts = self._remove_target_pts(rpts, zpts)
 
         return rpts, zpts
     
@@ -153,14 +183,15 @@ class PolygonBoundary:
         Rb, Zb = Rg + n_b[0], Zg + n_b[1]
 
         #If boundary point is an endpoint, follow bisection angle.
-        if (loc_b <= 0.0) or (loc_b >= 1.0):
-            utils.logger.debug(f"Calculating bisection vector for ghost point: {Rg,Zg}.")
-            if loc_b >= 1.0:
-                idx_b += 1
-            bsct = self._vertex_bisector(Rb, Zb, idx_b)
-            #Overwrite N_b with bisector.
-            N_len = np.sqrt(n_b[0]**2 + n_b[1]**2)
-            n_b[0], n_b[1] = N_len*bsct[0], N_len*bsct[1]
+        #TODO: How to handle normal at vertex for BCs???
+        #if (loc_b <= 0.0) or (loc_b >= 1.0):
+        #    utils.logger.debug(f"Calculating bisection vector for ghost point: {Rg,Zg}.")
+        #    if loc_b >= 1.0:
+        #        idx_b += 1
+        #    bsct = self._vertex_bisector(Rb, Zb, idx_b)
+        #    #Overwrite N_b with bisector.
+        #    N_len = np.sqrt(n_b[0]**2 + n_b[1]**2)
+        #    n_b[0], n_b[1] = N_len*bsct[0], N_len*bsct[1]
 
         #Store image point.
         Rimg, Zimg = Rb + n_b[0], Zb + n_b[1]
@@ -204,6 +235,7 @@ class PolygonBoundary:
             ax.add_patch(patch)
 
             # ghost (green) and boundary-inside (blue)
+            ax.scatter(self.path.vertices[:,0], self.path.vertices[:,1], s=16, c='k', marker='o')
             ax.scatter(rpts[ghost_mask],  zpts[ghost_mask],  s=16, c='g',   marker='o', label='ghost')
             ax.scatter(rpts[border_mask], zpts[border_mask], s=16, c='blue',marker='o', label='inner')
 

@@ -9,7 +9,9 @@
          "type": "debugpy",
          "request": "launch",
          "program": "${file}",
-         "console": "integratedTerminal"
+         "console": "integratedTerminal",
+         "cwd": "${workspaceFolder}",          // set working dir if you use relative paths
+         "args": ["--debug"]
       },
    ]
 }
