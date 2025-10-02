@@ -146,7 +146,7 @@ class StructuredPoloidalGrid(object):
         rind = (R - self.R[0])/self.dR
         zind = (Z - self.Z[0])/self.dZ
 
-        #If original points were grid points need to round/snap due to floating point...
+        #If original points were grid points need to round/snap due to floating errors.
         ri, zi = np.rint(rind), np.rint(zind) #Nearest integer
         round_r = np.isclose(rind, ri, atol=utils.DEFAULT_TOL.path_tol, rtol=0.0)
         round_z = np.isclose(zind, zi, atol=utils.DEFAULT_TOL.path_tol, rtol=0.0)
