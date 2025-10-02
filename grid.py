@@ -216,7 +216,7 @@ class StructuredPoloidalGrid(object):
         #Use cell numbers to map to ghost array.
         ghost_lin = np.flatnonzero(ghost_mask.ravel(order="C"))
         ghost_id  = np.full(ghost_mask.shape, -1)
-        ghost_id.ravel(order="C")[ghost_lin] = np.arange(ghost_lin.size)
+        ghost_id[ghost_mask] = np.arange(ghost_mask.sum())
 
         wghts, wghts_in, num_wghts = weights.calc_perp_weights(indr_i, indz_i, in_mask)
 
