@@ -74,7 +74,7 @@ def main(args):
     #Generate ghost point mask and BC information. Includes 2d perp interp weights.
     tok_grid.generate_bounds(maps)
     #Generate parallel weights. TODO: Not used by BOUT++ yet. Uses hermite-spline interp by default.
-    #par_wghts = weights.calc_par_weights(maps)
+    par_wghts = weights.calc_par_weights(maps)
 
     psi = tok_field.psi
     attributes = {
