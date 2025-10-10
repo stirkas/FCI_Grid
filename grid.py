@@ -221,7 +221,7 @@ class StructuredPoloidalGrid(object):
             "bndry_pts":   np.stack([Rb, Zb], axis=-1),
             "normals":     np.stack([Rhat, Zhat], axis=-1),
             "image_inds":  np.stack([indr_i, indz_i], axis=-1),
-            "norm_dist":   norm_dist[np.newaxis, :],
+            "norm_dist":   norm_dist,
             "nw":          num_wghts,
             "is_plasma":   wghts_in.astype(np.float64),
             "weights":     wghts})
