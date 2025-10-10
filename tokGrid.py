@@ -68,12 +68,12 @@ def main(args):
     tok_field = MagneticField(tokData, tok_grid)
     tok_grid.attach_field(tok_field) #Get around circular import...
 
-    #Generate metric and maps and so on to write out for BSTING.
     maps, metrics = tok_grid.generate_maps()
 
-    #Generate ghost point mask and BC information. Includes 2d perp interp weights.
+    #Generate perp weights from ghost points/BCs.
     tok_grid.generate_bounds(maps)
-    #Generate parallel weights. TODO: Not used by BOUT++ yet. Uses hermite-spline interp by default.
+    #Generate parallel weights.
+    #TODO: Not used by BOUT++ yet. Uses hermite-spline interp by default.
     par_wghts = weights.calc_par_weights(maps)
 
     psi = tok_field.psi

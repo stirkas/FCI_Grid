@@ -114,17 +114,6 @@ class StructuredPoloidalGrid(object):
 
         #TODO: Pass self, RR, ZZ. But thats a cyclic dep. Can make a small grid info dataclass.
         return mpg.CoordinateMapping(self.nr, self.nz, self.dr, self.dz, RR, ZZ)
-    
-    def _find_grid_index(self, mask):
-        """
-        Finds the (x,z) index corresponding to the point on the grid from a given mask
-        of points to consider.
-        """
-        flat_mask  = mask.ravel(order="C") #Row major flattening for BOUT++.
-        ghost_lin  = np.flatnonzero(flat_mask)
-        indx, indz = np.unravel_index(ghost_lin, self.RR.shape, order="C")
-
-        return indx, indz
 
     def _find_index(self, R, Z, bound=True, show=False):
         """
@@ -141,7 +130,8 @@ class StructuredPoloidalGrid(object):
             Index as a float, same shape as R,Z.
         """
         if bound == False:
-            utils.logger.warn("Assuming image points possibly outside bounds...need to deal with complex boundaries to remove this flag.")
+            utils.logger.warn("Assuming image points possibly outside bounds...\
+                need to deal with complex boundaries to remove this flag.")
 
         rind = (R - self.R[0])/self.dR
         zind = (Z - self.Z[0])/self.dZ
@@ -203,34 +193,35 @@ class StructuredPoloidalGrid(object):
 
         return Rfwd, Zfwd, Rbwd, Zbwd
     
-    def generate_bounds(self, maps):
+    def     generate_bounds(self, maps):
         print("Generating ghost cell image points and boundary data...")
         #TODO: Create a vector data class for points. Use inside get_image_pts.
-        #Dont stack out. Define length/unit functions in dataclass.
+        #Dont stack below? Define length/unit functions in dataclass.
         in_mask, ghost_mask, (Rg, Zg), (Rb, Zb), (Ri, Zi), (Rn, Zn) \
             = self.wall.get_image_pts(self.RR, self.ZZ, show=utils.DEBUG_FLAG)
-
-        #Get indices required for interpolation.
-        indr_i, indz_i = self._find_index(Ri, Zi, bound=False)
+        #Get distance from wall to image. (I-B) dot n.
+        norm_dist = (Ri-Rb)*Rn + (Zi-Zb)*Zn
 
         #Use cell numbers to map to ghost array.
-        ghost_lin = np.flatnonzero(ghost_mask.ravel(order="C"))
         ghost_id  = np.full(ghost_mask.shape, -1)
         ghost_id[ghost_mask] = np.arange(ghost_mask.sum())
 
+        #Get indices required for interpolation.
+        indr_i, indz_i = self._find_index(Ri, Zi, bound=False)
         wghts, wghts_in, num_wghts = weights.calc_perp_weights(indr_i, indz_i, in_mask)
 
         maps.update({
-            "in_mask":    self.make_3d(in_mask).astype(np.uint8),
-            "ghost_id":   self.make_3d(ghost_id),
-            "ng":         Rg.size,
-            "ghost_pts":  np.stack([Rg, Zg], axis=-1),
-            "bound_pts":  np.stack([Rb, Zb], axis=-1),
-            "image_pts":  np.stack([Ri, Zi], axis=-1),
-            "normals":    np.stack([Rn, Zn], axis=-1),
-            "nw":         num_wghts,
-            "is_fluid":   wghts_in.astype(np.uint8),
-            "weights":    wghts})
+            "in_mask":     self.make_3d(in_mask).astype(np.float64),
+            "ghost_id":    self.make_3d(ghost_id).astype(np.float64),
+            "ng":          Rg.size,
+            "image_pts":   np.stack([Ri, Zi], axis=-1),
+            "bndry_pts":   np.stack([Rb, Zb], axis=-1),
+            "normals":     np.stack([Rn, Zn], axis=-1),
+            "image_inds":  np.stack([indr_i, indz_i], axis=-1),
+            "norm_dist":   norm_dist[np.newaxis, :],
+            "nw":          num_wghts,
+            "is_plasma":   wghts_in.astype(np.float64),
+            "weights":     wghts})
 
     def generate_maps(self):
         print("Generating metric and map data for output file...")
@@ -312,16 +303,12 @@ class StructuredPoloidalGrid(object):
         for key, value in coord_map_ctr.dagp_vars.items():
             coord_map_ctr.dagp_vars[key] = self.make_3d(value)
         maps.update(coord_map_ctr.dagp_vars)
-        
-        #Calculate interpolation weights directly in python rather than BSTING.
-        #TODO: BSTING would need to read in weights still...BSTING can do bilinear or cubic hermite spline itself at the moment.
-        #weights = calc_weights(maps)
 
         return maps, metric
 
     def plotConfig(self, psi, maps):
         print("Plotting equilibrium configuration...")
-        fig, ax = plt.subplots(figsize=(8,10)) #TODO: Base figsize on eqbm dimensions?
+        fig, ax = plt.subplots(figsize=(8,10)) #TODO: Base figsize on device dimensions?
         cf = ax.contour(self.R, self.Z, psi.T, levels=100, cmap='viridis')
         plt.colorbar(cf, ax=ax)
 
@@ -339,15 +326,19 @@ class StructuredPoloidalGrid(object):
         offset = 0.005 #Use minor radial offset from separatrix.
         rsep, zsep = self.sptx.path.vertices[:,0], self.sptx.path.vertices[:,1]
         R1, Z1     = rsep[self.sep_idx] + offset, zsep[self.sep_idx]
-        print(f"Tracing field line to wall in forward direction from {R1,Z1}...")
+        print(f"Tracing field line to wall in forward direction \
+            from {R1,Z1} near separatrix...")
         Rvals_pos, Zvals_pos = self.field.trace_until_wall(R1, Z1, self.phi, self.dphi,
                                                     self.wall, direction=self.field.dir)
-        print(f"Tracing field line to wall in backward direction from {R1,Z1}...")
+        print(f"Tracing field line to wall in backward direction \
+            from {R1,Z1} near separatrix...")
         Rvals_neg, Zvals_neg = self.field.trace_until_wall(R1, Z1, self.phi, self.dphi,
                                                     self.wall, direction=-self.field.dir)
         phi_dir, neg_phi_dir = ('+','-') if self.field.dir == 1 else ('-','+')
-        ax.plot(Rvals_pos, Zvals_pos, '.', color='red',  label='$+\\hat{b}_{\\phi} = ' + phi_dir     + '\\hat{\\phi}$')
-        ax.plot(Rvals_neg, Zvals_neg, '.', color='cyan', label='$-\\hat{b}_{\\phi} = ' + neg_phi_dir + '\\hat{\\phi}$')
+        ax.plot(Rvals_pos, Zvals_pos, '.', color='red',
+            label='$+\\hat{b}_{\\phi} = ' + phi_dir     + '\\hat{\\phi}$')
+        ax.plot(Rvals_neg, Zvals_neg, '.', color='cyan',
+            label='$-\\hat{b}_{\\phi} = ' + neg_phi_dir + '\\hat{\\phi}$')
 
         #Test field line tracing on grid.
         if (utils.DEBUG_FLAG):
@@ -374,7 +365,7 @@ class StructuredPoloidalGrid(object):
                 ax.plot([x0, xb], [y0, yb], '--', color='cyan', linewidth=2)
                 ax.scatter(x0, y0, color='k', s=100, marker='*', zorder=2)
 
-        #Plot critical points. #TODO: Seems incorrect.
+        #Add critical points.
         for point in self.opts:
             ax.plot(point[0], point[1], 'o', label='O',
                     markerfacecolor='none', markeredgecolor='lime')
@@ -383,8 +374,8 @@ class StructuredPoloidalGrid(object):
 
         handles, labels = ax.get_legend_handles_labels()
         by_label = dict(zip(labels, handles))
-        ax.legend(by_label.values(), by_label.keys(), loc='upper center', bbox_to_anchor=(0.5, 1.06),
-                ncol=len(labels), fancybox=True, shadow=True)
+        ax.legend(by_label.values(), by_label.keys(), loc='upper center',
+            bbox_to_anchor=(0.5, 1.06), ncol=len(labels), fancybox=True, shadow=True)
         ax.set_xlabel('R')
         ax.set_ylabel('Z')
         ax.grid(True)
