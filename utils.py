@@ -15,6 +15,11 @@ def length(v):
 def unit(v):
     return v/length(v)
 
+def unit_vecs(N):
+    # N shape (..., 2), last dim is (R,Z)
+    L = np.linalg.norm(N, axis=-1, keepdims=True)
+    return N / L
+
 #Utility functions/classes
 #TODO: Put into boundary handler class? With image point calculations.
 def neighbor_mask(point_mask, connectivity=4):

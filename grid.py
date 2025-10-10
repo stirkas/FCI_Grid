@@ -193,14 +193,17 @@ class StructuredPoloidalGrid(object):
 
         return Rfwd, Zfwd, Rbwd, Zbwd
     
-    def     generate_bounds(self, maps):
+    def generate_bounds(self, maps):
         print("Generating ghost cell image points and boundary data...")
         #TODO: Create a vector data class for points. Use inside get_image_pts.
         #Dont stack below? Define length/unit functions in dataclass.
         in_mask, ghost_mask, (Rg, Zg), (Rb, Zb), (Ri, Zi), (Rn, Zn) \
             = self.wall.get_image_pts(self.RR, self.ZZ, show=utils.DEBUG_FLAG)
         #Get distance from wall to image. (I-B) dot n.
-        norm_dist = (Ri-Rb)*Rn + (Zi-Zb)*Zn
+
+        nhat = utils.unit_vecs(np.stack([Rn,Zn], axis=-1))
+        Rhat, Zhat = nhat[..., 0], nhat[..., 1]
+        norm_dist = (Ri-Rb)*Rhat + (Zi-Zb)*Zhat
 
         #Use cell numbers to map to ghost array.
         ghost_id  = np.full(ghost_mask.shape, -1)
@@ -216,7 +219,7 @@ class StructuredPoloidalGrid(object):
             "ng":          Rg.size,
             "image_pts":   np.stack([Ri, Zi], axis=-1),
             "bndry_pts":   np.stack([Rb, Zb], axis=-1),
-            "normals":     np.stack([Rn, Zn], axis=-1),
+            "normals":     np.stack([Rhat, Zhat], axis=-1),
             "image_inds":  np.stack([indr_i, indz_i], axis=-1),
             "norm_dist":   norm_dist[np.newaxis, :],
             "nw":          num_wghts,
