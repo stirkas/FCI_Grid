@@ -65,8 +65,7 @@ class TokamakData():
 
         #Toroidal field component and q(psi).
         self.psi1D = np.linspace(self.paxis, self.pbdry, self.nr)
-        #self.psi1D = np.flip(self.psi1D) #TODO: For TCV it seems r is backwards??? Different cocos convention?
-        #self.psi1D = np.linspace(self.pbdry, self.paxis, nrg)
+        #self.psi1D = np.flip(self.psi1D) #TODO: For TCV it seems r is backwards??? Different cocos convention?\
         #TODO: Why doesnt ext=0 work ok when tracing field?
         self.f_spl = interpolate.InterpolatedUnivariateSpline(self.psi1D, self.fpol, ext=3) #ext=3 uses boundary values outside range.
         self.q_spl = interpolate.InterpolatedUnivariateSpline(self.psi1D, self.qpsi, ext=3) #ext=0 uses extrapolation as with RectBivSpline on 2D but doesnt work in the integrator.

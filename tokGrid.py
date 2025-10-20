@@ -1,10 +1,6 @@
 #!/usr/bin/env python
 
-from importlib.metadata import version
-import sys
 import uuid
-
-from pathlib import Path
 
 from boututils import datafile as bdata
 from hypnotoad import __version__ #TODO: Dont depend on hypnotoad.

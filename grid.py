@@ -199,8 +199,8 @@ class StructuredPoloidalGrid(object):
         #Dont stack below? Define length/unit functions in dataclass.
         in_mask, ghost_mask, (Rg, Zg), (Rb, Zb), (Ri, Zi), (Rn, Zn) \
             = self.wall.get_image_pts(self.RR, self.ZZ, show=utils.DEBUG_FLAG)
+        
         #Get distance from wall to image. (I-B) dot n.
-
         nhat = utils.unit_vecs(np.stack([Rn,Zn], axis=-1))
         Rhat, Zhat = nhat[..., 0], nhat[..., 1]
         norm_dist = (Ri-Rb)*Rhat + (Zi-Zb)*Zhat
@@ -328,20 +328,21 @@ class StructuredPoloidalGrid(object):
         #Trace field lines in both directions.
         offset = 0.005 #Use minor radial offset from separatrix.
         rsep, zsep = self.sptx.path.vertices[:,0], self.sptx.path.vertices[:,1]
-        R1, Z1     = rsep[self.sep_idx] + offset, zsep[self.sep_idx]
-        print(f"Tracing field line to wall in forward direction \
-            from {R1,Z1} near separatrix...")
-        Rvals_pos, Zvals_pos = self.field.trace_until_wall(R1, Z1, self.phi, self.dphi,
-                                                    self.wall, direction=self.field.dir)
-        print(f"Tracing field line to wall in backward direction \
-            from {R1,Z1} near separatrix...")
-        Rvals_neg, Zvals_neg = self.field.trace_until_wall(R1, Z1, self.phi, self.dphi,
-                                                    self.wall, direction=-self.field.dir)
-        phi_dir, neg_phi_dir = ('+','-') if self.field.dir == 1 else ('-','+')
-        ax.plot(Rvals_pos, Zvals_pos, '.', color='red',
-            label='$+\\hat{b}_{\\phi} = ' + phi_dir     + '\\hat{\\phi}$')
-        ax.plot(Rvals_neg, Zvals_neg, '.', color='cyan',
-            label='$-\\hat{b}_{\\phi} = ' + neg_phi_dir + '\\hat{\\phi}$')
+        #TODO: Add back when done removing points manually and messing up indices...
+        #R1, Z1     = rsep[self.sep_idx] + offset, zsep[self.sep_idx]
+        #print(f"Tracing field line to wall in forward direction \
+        #    from {R1,Z1} near separatrix...")
+        #Rvals_pos, Zvals_pos = self.field.trace_until_wall(R1, Z1, self.phi, self.dphi,
+        #                                            self.wall, direction=self.field.dir)
+        #print(f"Tracing field line to wall in backward direction \
+        #    from {R1,Z1} near separatrix...")
+        #Rvals_neg, Zvals_neg = self.field.trace_until_wall(R1, Z1, self.phi, self.dphi,
+        #                                            self.wall, direction=-self.field.dir)
+        #phi_dir, neg_phi_dir = ('+','-') if self.field.dir == 1 else ('-','+')
+        #ax.plot(Rvals_pos, Zvals_pos, '.', color='red',
+        #    label='$+\\hat{b}_{\\phi} = ' + phi_dir     + '\\hat{\\phi}$')
+        #ax.plot(Rvals_neg, Zvals_neg, '.', color='cyan',
+        #    label='$-\\hat{b}_{\\phi} = ' + neg_phi_dir + '\\hat{\\phi}$')
 
         #Test field line tracing on grid.
         if (utils.DEBUG_FLAG):

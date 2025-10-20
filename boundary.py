@@ -47,20 +47,15 @@ class PolygonBoundary:
 
     def _remove_target_pts(self, R, Z, tol=1e-2):
         #Note: Manual points from default gfile...
-        targets = np.array([
-            (1.0011,  1.2172),
-            (1.0285,  1.2172),
-            (1.2802,  1.3318),
-            (1.2802,  1.3484),
-            (1.4191,  1.3484),
-            (1.4191,  1.3100),
-            (1.3730,  1.3100),
+        targets = np.array([ #DIIID sharp slots.
             (2.3770,  0.3890),
-            (2.3770, -0.3890),
-            (1.3716, -1.3289),
-            (1.4206, -1.3289),
-            (1.4203, -1.3626),
-            (1.1533, -1.3626)])
+            (2.3770, -0.3890)])
+        #targets = np.array([(1.8747, -0.3847)])
+        #targets = [] 
+        #tcv = True
+        #for i, rpt in enumerate(R):
+        #    if R[i] >= 0.90 and (Z[i] <= -0.23 and Z[i] >= -0.60):
+        #        targets.append((R[i],Z[i]))
 
         pts = np.column_stack([R, Z])
         remove = np.zeros(len(pts), dtype=bool)
@@ -70,6 +65,14 @@ class PolygonBoundary:
             if d2[j] <= tol**2:
                 remove[j] = True
         kept = pts[~remove]
+
+        #Fix for TCV shape.
+        if (tcv):
+            for i, kpt in enumerate(kept):
+                if np.abs(kpt[0] - 1.093496) <= 1e-4 and np.abs(kpt[1] - -0.603975) <= 1e-4:
+                    kept[i][0] = kept[i-1][0]
+                    kept[i][1] = -0.526
+
         return kept[:,0], kept[:,1]
 
     def _clean_up_points(self, rpts: NDArray[np.floating], zpts: NDArray[np.floating], abs_tol: float
@@ -106,7 +109,7 @@ class PolygonBoundary:
         return rpts, zpts
     
     def _build_path(self) -> Path:
-        """Build a matplotlib Path and mark it explicitly closed."""
+        """Build a matplotlib Path (from straight line segments) and mark it explicitly closed."""
         verts = np.column_stack([self.rbdy, self.zbdy])
         codes = np.full(len(verts), Path.LINETO, dtype=np.uint8)
         #Set start and end vertex information per docs.
@@ -183,8 +186,10 @@ class PolygonBoundary:
         Rb, Zb = Rg + n_b[0], Zg + n_b[1]
 
         #If boundary point is an endpoint, follow bisection angle.
-        #TODO: How to handle normal at vertex for BCs???
-        #if (loc_b <= 0.0) or (loc_b >= 1.0):
+        #TODO: How to handle normal at vertex for BCs??? There is a way to do bisection
+        # and project the ghost onto the bisection vector apparently.
+        if (loc_b <= 0.0) or (loc_b >= 1.0):
+            utils.logger.debug(f"Vertex bisection for ghost point: {Rg,Zg}.")
         #    utils.logger.debug(f"Calculating bisection vector for ghost point: {Rg,Zg}.")
         #    if loc_b >= 1.0:
         #        idx_b += 1
@@ -198,10 +203,13 @@ class PolygonBoundary:
 
         #Lastly, if image point is outside, remove half of image length successively.
         #TODO: Find second intercept and go halfway between two boundaries?
-        while not self.contains(Rimg, Zimg):
-            utils.logger.debug(f"Moving outer image point back in for ghost point: {Rg,Zg}.")
-            Rout,  Zout = Rimg - Rb, Zimg - Zb
-            Rimg, Zimg  = Rb + Rout/2, Zb + Zout/2
+        #TODO: Update solver to handle different path lengths?
+        if not self.contains(Rimg, Zimg):
+            utils.logger.debug(f"Image point outside of domain for ghost point: {Rg,Zg}. \
+                               Try increasing resolution, generally 512x512 or 1024x1024 works.")
+        #    utils.logger.debug(f"Moving outer image point back in for ghost point: {Rg,Zg}.")
+        #    Rout,  Zout = Rimg - Rb, Zimg - Zb
+        #    Rimg, Zimg  = Rb + Rout/2, Zb + Zout/2
 
         return (Rb, Zb), (Rimg, Zimg), (n_b[0], n_b[1])
     
@@ -209,12 +217,15 @@ class PolygonBoundary:
                         show=False) -> NDArray[np.bool_]:
         """Generate mask of ghost points from wall and 2D gridpoint arrays."""
         inside = self.contains(rpts, zpts)
-        neighbors_in = utils.neighbor_mask(inside)
+        #TODO: Use connectivity=4 for finding ghosts.
+        #TODO: Use conn=8 now for some ghosts. Wont be used in code loops but will be ghost cells?
+        #TODO: Have an issue when a second layer of ghost cells is needed at sharp areas.
+        neighbors_in = utils.neighbor_mask(inside, connectivity=8)
         ghost_mask = (~inside) & neighbors_in
 
         #Now generate mask for inside cells which touch outside ones.
         outside = ~inside
-        neighbors_out = utils.neighbor_mask(outside)
+        neighbors_out = utils.neighbor_mask(outside, connectivity=8)
         border_mask = inside & neighbors_out
 
         #Get image points from ghost cells and wall points.
