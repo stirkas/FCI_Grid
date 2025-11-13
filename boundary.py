@@ -47,12 +47,12 @@ class PolygonBoundary:
 
     def _remove_target_pts(self, R, Z, tol=1e-2):
         #Note: Manual points from default gfile...
+        tcv = False
         targets = np.array([ #DIIID sharp slots.
             (2.3770,  0.3890),
             (2.3770, -0.3890)])
         #targets = np.array([(1.8747, -0.3847)])
         #targets = [] 
-        #tcv = True
         #for i, rpt in enumerate(R):
         #    if R[i] >= 0.90 and (Z[i] <= -0.23 and Z[i] >= -0.60):
         #        targets.append((R[i],Z[i]))
@@ -104,7 +104,7 @@ class PolygonBoundary:
         rpts, zpts = rpts[keep], zpts[keep]
 
         #TODO: Remove and reset angle bisection...
-        rpts, zpts = self._remove_target_pts(rpts, zpts)
+        #rpts, zpts = self._remove_target_pts(rpts, zpts)
 
         return rpts, zpts
     
@@ -125,7 +125,7 @@ class PolygonBoundary:
         #Broadcast to a common shape. Raises if shapes incompatible.
         rb, zb = np.broadcast_arrays(rpts, zpts)
         pts    = np.column_stack([rb.ravel(), zb.ravel()])
-        inside = self.path.contains_points(pts, radius=float(self.tol.path_edge_in_bias))
+        inside = self.path.contains_points(pts, radius=float(self.tol.path_edge_bias))
         inside = inside.reshape(rb.shape)
         #Return 0-D ndarray for scalars which is truth-y; return mask array for higher dims.
         return inside.item() if inside.ndim == 0 else inside

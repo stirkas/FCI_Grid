@@ -142,19 +142,19 @@ class Tolerances:
     path_tol:        float = 1e-12 #TODO: Rename to grid tol? Basically what it is assuming paths on grid points.
     path_angle_tol:  float = 1e-12
     closed_path_tol: float = DEFAULT_CLOSED_PATH_TOL #For testing path is closed.
-    path_edge_in_bias: float | None = field(default=None) #Use to bias points on wall to inside.
+    path_edge_bias: float | None = field(default=None) #Use to bias points on wall to inside.
 
     def __post_init__(self):
-        if self.path_edge_in_bias is None:
-            object.__setattr__(self, "path_edge_in_bias", -self.path_tol) #Bias points inside.
+        if self.path_edge_bias is None:
+            object.__setattr__(self, "path_edge_bias", self.path_tol) #Bias points inside.
         if self.closed_path_tol < 0:
             raise ValueError("closed_path_tol must be ≥ 0")
         if self.path_tol < 0:
             raise ValueError("path_tol must be ≥ 0")
         if self.path_angle_tol < 0:
             raise ValueError("path_angle_tol must be ≥ 0")
-        if self.path_edge_in_bias >= 0:
-            raise ValueError("path_edge_in_bias should be negative to bias points inside.")
+        if self.path_edge_bias <= 0:
+            raise ValueError("path_edge_bias should be positive to bias points inside.")
         
         if self.closed_path_tol == self.DEFAULT_CLOSED_PATH_TOL:
             logger.warn(f"Using tol of {self.closed_path_tol:f} to check paths are closed. "
@@ -162,8 +162,8 @@ class Tolerances:
 
 #Define some useful globals.
 DEFAULT_GFILE = "TokData/DIIID/g162940.02944_670"
-DEFAULT_NR = 64
-DEFAULT_NZ = 64
+DEFAULT_NR = 64 #TODO: Set nx to default grid res and nz += 4? Can take one arg instead then.
+DEFAULT_NZ = DEFAULT_NR + 4 #Because MZG = 0 but MXG = 2.
 DEFAULT_NPHI = 16
 DEBUG_FLAG = False
 logger = Logger(min_level="info", stream=sys.stdout)

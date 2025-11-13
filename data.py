@@ -24,15 +24,15 @@ class TokamakData():
         self.nz = data["ny"]
 
         # Get the range of major radius
-        self.rmin = data["rleft"]
-        self.rmax = data["rdim"] + self.rmin
+        self.rmin = 1.0 #data["rleft"]
+        self.rmax = 4.0 #data["rdim"] + self.rmin
 
         # Range of height
-        self.zmin = data["zmid"] - 0.5*data["zdim"]
-        self.zmax = data["zmid"] + 0.5*data["zdim"]
+        self.zmin = -1.5 #data["zmid"] - 0.5*data["zdim"]
+        self.zmax = 1.5  #data["zmid"] + 0.5*data["zdim"]
 
-        self.R0 = data["rmagx"]
-        self.Z0 = data["zmagx"]
+        self.R0 = (self.rmax+self.rmin)/2 #data["rmagx"]
+        self.Z0 = (self.zmax+self.zmin)/2 #data["zmagx"]
 
         self.r = np.linspace(self.rmin, self.rmax, self.nr)
         self.z = np.linspace(self.zmin, self.zmax, self.nz)
@@ -65,7 +65,8 @@ class TokamakData():
 
         #Toroidal field component and q(psi).
         self.psi1D = np.linspace(self.paxis, self.pbdry, self.nr)
-        #self.psi1D = np.flip(self.psi1D) #TODO: For TCV it seems r is backwards??? Different cocos convention?\
+        if (self.pbdry < self.paxis): #TODO: If minor radius decreasing means diff COCOS convention, does anything else need to change?
+            self.psi1D = np.flip(self.psi1D)
         #TODO: Why doesnt ext=0 work ok when tracing field?
         self.f_spl = interpolate.InterpolatedUnivariateSpline(self.psi1D, self.fpol, ext=3) #ext=3 uses boundary values outside range.
         self.q_spl = interpolate.InterpolatedUnivariateSpline(self.psi1D, self.qpsi, ext=3) #ext=0 uses extrapolation as with RectBivSpline on 2D but doesnt work in the integrator.

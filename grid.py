@@ -6,6 +6,7 @@ if TYPE_CHECKING:
 import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib.patches import PathPatch
+from tqdm import tqdm
 
 #TODO: Use freegs? Where hypnotoad gets it from initially. Or write own pythonically (cough cough chatGPT).
 from hypnotoad.utils.critical import find_critical as fc
@@ -15,11 +16,58 @@ import mapping as mpg
 import utils
 import weights
 
+def circle_boundary_points(R0, Z0, a, N=512, theta0=0.0, theta1=2*np.pi, closed=False, ccw=True):
+    """
+    Return r,z points on a circle centered at (R0,Z0) with radius a.
+
+    Params
+    ------
+    R0, Z0 : float        # center
+    a      : float        # radius
+    N      : int          # number of samples (uniform in angle)
+    theta0 : float        # start angle (radians)
+    theta1 : float        # end angle (radians), can be < 2π for an arc
+    closed : bool         # if True, duplicate the first point at the end
+    ccw    : bool         # orientation; False gives clockwise ordering
+
+    Returns
+    -------
+    r, z           : (N[, +1],) arrays of coordinates
+    n_r, n_z       : outward unit normals at each point
+    w              : arc-length weights (midpoint rule), sum ≈ arc length
+    """
+    # parameter angles (midpoint rule -> better for integrals than including endpoints)
+    th = np.linspace(theta0, theta1, N, endpoint=False)
+    if not ccw:
+        th = th[::-1]
+
+    r = R0 + a*np.cos(th)
+    z = Z0 + a*np.sin(th)
+
+    # outward normals for a circle are just (cos, sin)
+    n_r = np.cos(th)
+    n_z = np.sin(th)
+
+    # uniform angular spacing
+    dth = (theta1 - theta0)/N
+    # arc-length weights for midpoint rule
+    w = a * dth * np.ones_like(th)
+
+    if closed:
+        # optionally append the first point to close the polygon
+        r = np.append(r, r[0])
+        z = np.append(z, z[0])
+        n_r = np.append(n_r, n_r[0])
+        n_z = np.append(n_z, n_z[0])
+        w = np.append(w, 0.0)  # last weight zero so sum stays the same
+
+    return r, z, n_r, n_z, w
+
 class StructuredPoloidalGrid(object):
     """Represents a structured poloidal grid in R,phi,Z."""
     #TODO: Move 3D logic outside poloidal grid class? Into general grid class?
 
-    def __init__(self, eq_data, nr=64, nphi=8, nz=64, make3D=False, MRG=2, MYG=1, MZG=2):
+    def __init__(self, eq_data, nr=utils.DEFAULT_NR, nphi=utils.DEFAULT_NPHI, nz=utils.DEFAULT_NZ, make3D=False, MRG=2, MYG=1, MZG=0):
         #TODO: Is default padding in Z ok? Still periodic in BOUT...
         self.Lr = eq_data.rmax - eq_data.rmin
         self.Lz = eq_data.zmax - eq_data.zmin
@@ -31,10 +79,11 @@ class StructuredPoloidalGrid(object):
         self.MRG, self.MYG, self.MZG = MRG, MYG, MZG
         self.nr = nr + 2*self.MRG
         self.nz = nz + 2*self.MZG
-        self.R  = np.linspace(eq_data.rmin, eq_data.rmax, nr)
-        self.Z  = np.linspace(eq_data.zmin, eq_data.zmax, nz)
-        self.dR = self.R[1]-self.R[0]
-        self.dZ = self.Z[1]-self.Z[0]
+        self.dR = self.Lr/nr
+        self.dZ = self.Lz/nz
+        #TODO Create R and Z like this to match hermes/BOUT output.
+        self.R  = eq_data.rmin + (0.5 + np.arange(0,nr))*self.dR
+        self.Z  = eq_data.zmin + np.arange(0,nz)*self.dZ
         ghosts_lo_R = self.R[0]  - self.dR*np.arange(self.MRG, 0, -1)
         ghosts_lo_Z = self.Z[0]  - self.dZ*np.arange(self.MZG, 0, -1)
         ghosts_hi_R = self.R[-1] + self.dR*np.arange(1, self.MRG+1)
@@ -42,17 +91,22 @@ class StructuredPoloidalGrid(object):
         self.R = np.concatenate((ghosts_lo_R, self.R, ghosts_hi_R))
         self.Z = np.concatenate((ghosts_lo_Z, self.Z, ghosts_hi_Z))
         self.RR, self.ZZ = np.meshgrid(self.R, self.Z, indexing='ij')
-        self.dr, self.dz = 1/(nr-1), 1/(nz-1) #Note, normalized.
+        self.dr, self.dz = 1/nr, 1/nz #Note, normalized.
+
+        #Create new wall for MMS testing...
+        r, z, n_r, n_z, w = circle_boundary_points(self.R[self.nr//2], self.Z[nz//2], a=self.Lr/3, N=512)
 
         #Create the separatrix and wall boundaries. #TODO: Separate to device class? Which holds grid, boundaries, field, etc.
         print("Generating separatrix boundary path...")
         self.sep_idx = np.argmax(eq_data.rbdy)
         self.sptx = bdy.PolygonBoundary(eq_data.rbdy, eq_data.zbdy)
         print("Generating wall boundary path...")
-        self.wall = bdy.PolygonBoundary(eq_data.rlmt, eq_data.zlmt)
+        self.wall = bdy.PolygonBoundary(r,z)
+        #self.wall = bdy.PolygonBoundary(eq_data.rlmt, eq_data.zlmt)
         #Also create ghost point boundary for final plotting.
+        #TODO: Currently stop at zmax - dz because z periodic in BOUT++ so not shifted by 1/2 from bdry...
         self.ghst = bdy.PolygonBoundary([eq_data.rmin, eq_data.rmin, eq_data.rmax, eq_data.rmax, eq_data.rmin],
-                                        [eq_data.zmin, eq_data.zmax, eq_data.zmax, eq_data.zmin, eq_data.zmin])
+                                        [eq_data.zmin, eq_data.zmax-self.dZ, eq_data.zmax-self.dZ, eq_data.zmin, eq_data.zmin])
 
         #Handle toroidal direction.
         self.phi  = 0.0
@@ -130,8 +184,8 @@ class StructuredPoloidalGrid(object):
             Index as a float, same shape as R,Z.
         """
         if bound == False:
-            utils.logger.warn("Assuming image points possibly outside bounds...\
-                need to deal with complex boundaries to remove this flag.")
+            utils.logger.warn("Assuming image points possibly outside bounds..."
+                " need to deal with complex boundaries to remove this flag.")
 
         rind = (R - self.R[0])/self.dR
         zind = (Z - self.Z[0])/self.dZ
@@ -178,7 +232,7 @@ class StructuredPoloidalGrid(object):
         gridPts = np.column_stack((self.RR.ravel(), self.ZZ.ravel()))
         fwdPts  = np.zeros_like(gridPts)
         bwdPts  = np.zeros_like(gridPts)
-        for idx, (r0, z0) in enumerate(gridPts):
+        for idx, (r0, z0) in enumerate(tqdm(gridPts,desc="Tracing",unit="pt")):
             sln = self.field.trace_field_line(r0, z0, self.phi, self.field.dir*self.dphi)
             fwdPts[idx, 0], fwdPts[idx, 1] = sln.y[0, -1], sln.y[1, -1]
 
@@ -213,10 +267,11 @@ class StructuredPoloidalGrid(object):
         indr_i, indz_i = self._find_index(Ri, Zi, bound=False)
         wghts, wghts_in, num_wghts = weights.calc_perp_weights(indr_i, indz_i, in_mask)
 
-        maps.update({
+        maps.update({ #TODO: Add debug check for images missing 4 corners if need more ghosts.
             "in_mask":     self.make_3d(in_mask).astype(np.float64),
             "ghost_id":    self.make_3d(ghost_id).astype(np.float64),
             "ng":          Rg.size,
+            "ghost_pts":   np.stack([Rg, Zg], axis=-1),
             "image_pts":   np.stack([Ri, Zi], axis=-1),
             "bndry_pts":   np.stack([Rb, Zb], axis=-1),
             "normals":     np.stack([Rhat, Zhat], axis=-1),
@@ -299,8 +354,25 @@ class StructuredPoloidalGrid(object):
 
         #Update gyy's with field line following factors for parallel operators, since this is handled along field lines.
         parFac = Bmag3D/Bphi3D
-        metric.update({k: v/parFac**2 for k,v in metric.items() if k in ("g22", "forward_g22", "backward_g22")})
-        metric.update({k: v*parFac**2 for k,v in metric.items() if k in ("g_22", "forward_g_22", "backward_g_22")})
+        #metric.update({k: v/parFac**2 for k,v in metric.items() if k in ("g22", "forward_g22", "backward_g22")})
+        #metric.update({k: v*parFac**2 for k,v in metric.items() if k in ("g_22", "forward_g_22", "backward_g_22")})
+
+        #Rcirc, Zcirc, a = self.R[self.nr//2], self.Z[self.nz//2], self.Lr/3
+        #xfaces, zfaces, (P0x,P0z,P1x,P1z), (Q0x,Q0z,Q1x,Q1z) = cc.plus_face_intercepts(self.RR, self.ZZ, Rcirc, Zcirc, a)
+        #wx = cc.face_aperture_from_intercepts(P0x, P0z, P1x, P1z, xfaces, Rcirc, Zcirc, a)
+        #wz = cc.face_aperture_from_intercepts(Q0x, Q0z, Q1x, Q1z, zfaces, Rcirc, Zcirc, a)
+
+        #fig, ax, wx_chk, wz_chk = cc.plot_face_inside_with_circle(
+        #    self.RR, self.ZZ, Rcirc, Zcirc, a,
+        #    xfaces, zfaces,
+        #    P0x,P0z,P1x,P1z,
+        #    Q0x,Q0z,Q1x,Q1z,
+        #    title="Inside portions of +faces (red:+x, orange:+z)"
+        #)
+
+        #cc.check_weight_consistency(Rcirc, Zcirc, a, P0x,P0z,P1x,P1z, xfaces, wx,
+        #                            Q0x,Q0z,Q1x,Q1z, zfaces, wz)
+        #plt.show()
 
         #Get finite volume operators for primary grid.
         for key, value in coord_map_ctr.dagp_vars.items():
@@ -312,6 +384,7 @@ class StructuredPoloidalGrid(object):
     def plotConfig(self, psi, maps):
         print("Plotting equilibrium configuration...")
         fig, ax = plt.subplots(figsize=(8,10)) #TODO: Base figsize on device dimensions?
+        #TODO: Also show contour if debug else just contourf.
         cf = ax.contour(self.R, self.Z, psi.T, levels=100, cmap='viridis')
         plt.colorbar(cf, ax=ax)
 
@@ -323,7 +396,7 @@ class StructuredPoloidalGrid(object):
                     clip_on=False, lw=1.5, linestyle='--')
         ax.add_patch(patch)
         ax.add_patch(ghost)
-        ax.add_patch(sptx)
+        #ax.add_patch(sptx)
 
         #Trace field lines in both directions.
         offset = 0.005 #Use minor radial offset from separatrix.

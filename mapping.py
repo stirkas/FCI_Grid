@@ -1,6 +1,8 @@
 import numpy as np
 from scipy import interpolate
 
+import utils
+
 class CoordinateMapping(object):
     """Represents a coordinate mapping from cartesian R,Z to normalized x,z coordinates."""
     def __init__(self, nx, nz, dx, dz, RR, ZZ):
@@ -13,9 +15,10 @@ class CoordinateMapping(object):
         self.ZZ = ZZ
 
         #Generate info for metric/derivative calculations.
-        self.xinds  = np.arange(self.nx)
-        self.zinds  = np.arange(self.nz)
+        self.xinds  = (0.5 + np.arange(self.nx))*self.dx
+        self.zinds  = (np.arange(self.nz))*self.dz
         self.xxinds, self.zzinds = np.meshgrid(self.xinds, self.zinds, indexing='ij')
+
         self.spl_x = interpolate.RectBivariateSpline(self.xinds, self.zinds, self.RR)
         self.spl_z = interpolate.RectBivariateSpline(self.xinds, self.zinds, self.ZZ)
 
@@ -60,21 +63,15 @@ class CoordinateMapping(object):
             - **g_xx, g_xz, g_zz**: Contravariant components
 
         """
-        #Differentials of (R,Z) when stepping in computational directions (r,z)
-        dR_dx, dZ_dx = self._get_coordinates(dx=1, dz=0) #∆X when stepping in +r
-        dR_dz, dZ_dz = self._get_coordinates(dx=0, dz=1) #∆X when stepping in +z
-        #Convert differentials to partial derivatives.
-        parR_x = dR_dx/self.dx
-        parZ_x = dZ_dx/self.dx
-        parR_z = dR_dz/self.dz
-        parZ_z = dZ_dz/self.dz
+        #Partial derivatives of (R,Z) when stepping in computational directions (r,z)
+        parR_x, parZ_x = self._get_coordinates(dx=1, dz=0)
+        parR_z, parZ_z = self._get_coordinates(dx=0, dz=1)
         #J[k,i,...] with k∈{x,z}, i∈{R,Z}  → (2,2,nR,nZ)
-        J = np.stack([[parR_x, parZ_x],
-                      [parR_z, parZ_z]], axis=0)
+        J = np.stack([[parR_x, parR_z],
+                      [parZ_x, parZ_z]], axis=0)
 
-        #Metric tensor g_{ij} = Σ_k J_{k i} J_{k j}  (D’Haeseleer 2.5.27)
-        #Note our J is transposed, so g = J J^T
-        g = np.einsum('ji...,ki...->jk...', J, J)#Calculate the gradient along each coordinate.
+        #Metric tensor g = J^T J.
+        g = np.einsum('ki...,kj...->ij...', J, J)
 
         assert np.all(g[0, 0] > 0), \
                 f"g[0, 0] is expected to be positive, but some values are not (minimum {np.min(g[0, 0])})"
@@ -105,7 +102,8 @@ class CoordinateMapping(object):
         Rc, Jp can be (nx,nz) arrays; dx,dz are logical spacings.
         Multiply by 2*pi for full volume.
         """
-        return self.RR*self.J*self.dx*self.dz
+        return self.J*self.dx*self.dz
+        #return self.RR*self.J*self.dx*self.dz
     
     def _face_metrics(self):
         """
@@ -228,10 +226,12 @@ class CoordinateMapping(object):
         Lz_x, Lx_z = self._face_lengths(fc_metric)
         Rx_face, Rz_face = self._R_faces()
 
-        dagp_fv_XX = self._pad_to_full(fac_XX * Lz_x * Rx_face)
-        dagp_fv_XZ = self._pad_to_full(fac_XZ * Lz_x * Rx_face)
-        dagp_fv_ZZ = self._pad_to_full(fac_ZZ * Lx_z * Rz_face, dim='z')
-        dagp_fv_ZX = self._pad_to_full(fac_ZX * Lx_z * Rz_face, dim='z')
+        utils.logger.info("Padding finite volume operators to 0 at outer Lx/Lz edges. "
+                          "Does not affect immersed boundary if further in.")
+        dagp_fv_XX = self._pad_to_full(fac_XX * Lz_x) # * Rx_face)
+        dagp_fv_XZ = self._pad_to_full(fac_XZ * Lz_x) # * Rx_face)
+        dagp_fv_ZZ = self._pad_to_full(fac_ZZ * Lx_z, dim='z') # * Rz_face, dim='z')
+        dagp_fv_ZX = self._pad_to_full(fac_ZX * Lx_z, dim='z') # * Rz_face, dim='z')
 
         dagp_vars = {
             "dagp_fv_XX": dagp_fv_XX,
@@ -242,82 +242,3 @@ class CoordinateMapping(object):
         }
 
         return dagp_vars
-
-###################
-####DAGP TEST CODE: TODO: Test DAGP vars...
-###
-###from numpy.polynomial.legendre import leggauss
-###
-#### ---- You provide these two callables (splines or analytic) ----
-#### Each must accept arrays x,z and return arrays of same shape.
-###R   = lambda x,z: Rspl.ev(x,z)            # or analytic R(x,z)
-###Rx  = lambda x,z: Rspl.ev(x,z, dx=1)      # dR/dx
-###Rz  = lambda x,z: Rspl.ev(x,z, dy=1)      # dR/dz
-###Z   = lambda x,z: Zspl.ev(x,z)
-###Zx  = lambda x,z: Zspl.ev(x,z, dx=1)
-###Zz  = lambda x,z: Zspl.ev(x,z, dy=1)
-###
-###def cov_metrics(x,z):
-###    Rxv,Rzv,Zxv,Zzv = Rx(x,z), Rz(x,z), Zx(x,z), Zz(x,z)
-###    gxx = Rxv*Rxv + Zxv*Zxv
-###    gxz = Rxv*Rzv + Zxv*Zzv
-###    gzz = Rzv*Rzv + Zzv*Zzv
-###    rtg = np.sqrt(np.maximum(gxx*gzz - gxz*gxz, 0.0))  # |J|
-###    return gxx, gxz, gzz, rtg
-###
-###def volumes_gauss(nx,nz, p=2, dx=1.0,dz=1.0):
-###    xi,w = leggauss(p)
-###    ii = np.arange(nx)[:,None,None,None]
-###    jj = np.arange(nz)[None,:,None,None]
-###    X = ii + 0.5*xi[None,None,:,None]
-###    Z = jj + 0.5*xi[None,None,None,:]
-###    X = np.broadcast_to(X, (nx,nz,p,p))
-###    Z = np.broadcast_to(Z, (nx,nz,p,p))
-###    gxx,gxz,gzz,rtg = cov_metrics(X,Z)
-###    vol = (dx*dz)/(4.0) * np.sum((w[:,None]*w[None,:])[None,None]* R(X,Z)*rtg, axis=(2,3))
-###    return vol
-###
-###def xface_facs_gauss(nx,nz, p=2, dz=1.0):
-###    xi,w = leggauss(p)
-###    X = (np.arange(nx-1)+0.5)[:,None,None]
-###    Z = np.arange(nz)[None,:,None] + 0.5*xi[None,None,:]
-###    X = np.broadcast_to(X, (nx-1,nz,p)); Z = np.broadcast_to(Z, (nx-1,nz,p))
-###    gxx,gxz,gzz,rtg = cov_metrics(X,Z)
-###    facXX = -(dz/2.0)*np.sum(w*( R(X,Z)*gzz/rtg ), axis=-1)
-###    facXZ =  (dz/2.0)*np.sum(w*( R(X,Z)*gxz/rtg ), axis=-1)
-###    return facXX, facXZ
-###
-###def zface_facs_gauss(nx,nz, p=2, dx=1.0):
-###    xi,w = leggauss(p)
-###    X = np.arange(nx)[:,None,None] + 0.5*xi[None,None,:]
-###    Z = (np.arange(nz-1)+0.5)[None,:,None]
-###    X = np.broadcast_to(X, (nx,nz-1,p)); Z = np.broadcast_to(Z, (nx,nz-1,p))
-###    gxx,gxz,gzz,rtg = cov_metrics(X,Z)
-###    facZX = -(dx/2.0)*np.sum(w*( R(X,Z)*gxz/rtg ), axis=-1)
-###    facZZ =  (dx/2.0)*np.sum(w*( R(X,Z)*gxx/rtg ), axis=-1)
-###    return facZX, facZZ
-###
-#### --- Reference (e.g., 8x8 and 8-pt) ---
-###def volumes_ref(nx,nz):        return volumes_gauss(nx,nz,p=8)
-###def xfaces_ref(nx,nz):         return xface_facs_gauss(nx,nz,p=8)
-###def zfaces_ref(nx,nz):         return zface_facs_gauss(nx,nz,p=8)
-###
-#### --- Method 2 (midpoint) just for volumes; faces analogous at face centers ---
-###def volumes_midpoint(nx,nz, dx=1.0,dz=1.0):
-###    ii,jj = np.meshgrid(np.arange(nx), np.arange(nz), indexing='ij')
-###    gxx,gxz,gzz,rtg = cov_metrics(ii,jj)
-###    return R(ii,jj)*rtg*dx*dz
-###
-#### Timing/accuracy example for one grid:
-###def benchmark(nx,nz,R,Z,Rx,Rz,Zx,Zz):
-###    t0=time.perf_counter()
-###    vref=volumes_ref(nx,nz); t1=time.perf_counter()
-###    v2  =volumes_midpoint(nx,nz); t2=time.perf_counter()
-###    v3  =volumes_gauss(nx,nz,p=2); t3=time.perf_counter()
-###    print(f"ref 8x8: {t1-t0:.3f}s  | midpoint: {t2-t1:.3f}s  | 2x2 Gauss: {t3-t2:.3f}s")
-###    rel2 = lambda a,b: np.linalg.norm((a-b).ravel())/np.linalg.norm(b.ravel())
-###    relinf=lambda a,b: np.max(np.abs(a-b))/np.max(np.abs(b))
-###    print(f"midpoint err L2={rel2(v2,vref):.3e}, Linf={relinf(v2,vref):.3e}")
-###    print(f"2x2 Gauss err L2={rel2(v3,vref):.3e}, Linf={relinf(v3,vref):.3e}")
-###
-###################

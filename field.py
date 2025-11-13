@@ -8,9 +8,9 @@ from grid import StructuredPoloidalGrid
 class MagneticField(object): #TODO: How best to derive from general base class?
     def __init__(self, eqb: TokamakData, grd: StructuredPoloidalGrid):
         self.psi  = eqb.psi_func(grd.R, grd.Z)
-        self.Bp_R = eqb.sign_ip*eqb.psi_func(grd.R, grd.Z, dy=1)/grd.RR
-        self.Bp_Z = -eqb.sign_ip*eqb.psi_func(grd.R, grd.Z, dx=1)/grd.RR
-        self.Bphi = eqb.f_spl(eqb.psi_func(grd.R, grd.Z))/grd.RR
+        self.Bp_R = np.zeros_like(self.psi) #eqb.sign_ip*eqb.psi_func(grd.R, grd.Z, dy=1)/grd.RR 
+        self.Bp_Z = np.zeros_like(self.psi) #-eqb.sign_ip*eqb.psi_func(grd.R, grd.Z, dx=1)/grd.RR
+        self.Bphi = np.ones_like(self.psi)  #eqb.f_spl(eqb.psi_func(grd.R, grd.Z))/grd.RR        
         self.Bp   = np.sqrt(self.Bp_R**2 + self.Bp_Z**2)
         self.Bmag = np.sqrt(self.Bp_R**2 + self.Bp_Z**2 + self.Bphi**2)
         self.pres = eqb.p_spl(eqb.psi_func(grd.R,grd.Z)) #Not really field related...
@@ -18,8 +18,8 @@ class MagneticField(object): #TODO: How best to derive from general base class?
         self.dir  = eqb.sign_b0
 
         #Compute derivatives along phi NOT B_phi. R factor comes from cylindrical geometry.
-        dRdphi = grd.RR*self.Bp_R/self.Bphi
-        dZdphi = grd.RR*self.Bp_Z/self.Bphi
+        dRdphi = np.zeros_like(self.psi) #grd.RR*self.Bp_R/self.Bphi
+        dZdphi = np.zeros_like(self.psi) #grd.RR*self.Bp_Z/self.Bphi
         self._field_line_rhs = self._setup_field_line_interpolation(grd.R, grd.Z, dRdphi, dZdphi)
         
     def _setup_field_line_interpolation(self, R, Z, dRdphi, dZdphi, linear=False):
