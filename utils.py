@@ -133,28 +133,29 @@ class Logger:
         except Exception:
             return False
 
-@dataclass(slots=True, frozen=True)
+#TODO: Is it worth it to have a floating pt tol class? This is for doubles.
+@dataclass(slots=True, frozen=False)
 class Tolerances:
     #Not a field: class-level constant
     DEFAULT_CLOSED_PATH_TOL: ClassVar[float] = 0.0
+    DEFAULT_PATH_TOL: ClassVar[float] = 1e-12
 
     #TODO: Add checks that tolerances are reasonable if manually created?
-    path_tol:        float = 1e-12 #TODO: Rename to grid tol? Basically what it is assuming paths on grid points.
-    path_angle_tol:  float = 1e-12
+    path_tol:        float = DEFAULT_PATH_TOL #TODO: Rename to grid tol? Basically what it is assuming paths on grid points.
+    path_angle_tol:  float = DEFAULT_PATH_TOL
     closed_path_tol: float = DEFAULT_CLOSED_PATH_TOL #For testing path is closed.
-    path_edge_bias: float | None = field(default=None) #Use to bias points on wall to inside.
+    #Use to bias points on wall to inside. Note, positive for ccw paths.
+    path_edge_bias: float = DEFAULT_PATH_TOL
 
     def __post_init__(self):
         if self.path_edge_bias is None:
-            object.__setattr__(self, "path_edge_bias", self.path_tol) #Bias points inside.
+            object.__setattr__(self, "path_edge_bias", self.path_tol)
         if self.closed_path_tol < 0:
             raise ValueError("closed_path_tol must be ≥ 0")
         if self.path_tol < 0:
             raise ValueError("path_tol must be ≥ 0")
         if self.path_angle_tol < 0:
             raise ValueError("path_angle_tol must be ≥ 0")
-        if self.path_edge_bias <= 0:
-            raise ValueError("path_edge_bias should be positive to bias points inside.")
         
         if self.closed_path_tol == self.DEFAULT_CLOSED_PATH_TOL:
             logger.warn(f"Using tol of {self.closed_path_tol:f} to check paths are closed. "

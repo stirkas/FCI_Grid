@@ -1,3 +1,4 @@
+import copy
 from typing import Tuple
 
 import numpy as np
@@ -30,11 +31,22 @@ class PolygonBoundary:
         if r.ndim != 1 or r.size < 3:
             raise ValueError("Need 1D arrays with at least 3 vertices for a polygon.")
 
-        self.tol = tol
+        self.tol = copy.deepcopy(tol)
 
-        self.rbdy, self.zbdy = self._clean_up_points(r, z, abs_tol=self.tol.closed_path_tol)
+        self.rbdy, self.zbdy = self._clean_up_points(r, z)
         self.num_pts = len(self.rbdy)
         self.path = self._build_path()
+
+        #Use shoelace formula to check if cw or ccw.
+        x, y = self.path.vertices[:, 0], self.path.vertices[:, 1]
+        area = 0.5 * np.sum(x[:-1] * y[1:] - x[1:] * y[:-1])
+        if np.isclose(area, 0.0, atol=self.tol.path_tol):
+            raise ValueError("Path has zero (or numerically zero) area.")
+        self.ccw = True if np.sign(area) > 0 else False
+        #Now that points exist, set path_edge_bias correctly for cw or ccw.
+        if ((self.ccw == True and np.sign(self.tol.path_edge_bias) < 0) or
+            (self.ccw == False and np.sign(self.tol.path_edge_bias) > 0)):
+                self.tol.path_edge_bias *= -1
 
         #Store segment vector information.
         #TODO: Use length functions? Handle vectors consistently...
@@ -75,13 +87,14 @@ class PolygonBoundary:
 
         return kept[:,0], kept[:,1]
 
-    def _clean_up_points(self, rpts: NDArray[np.floating], zpts: NDArray[np.floating], abs_tol: float
-                    ) -> Tuple[NDArray[np.floating], NDArray[np.floating]]:
+    def _clean_up_points(self, rpts: NDArray[np.floating], zpts: NDArray[np.floating]) \
+                     -> Tuple[NDArray[np.floating], NDArray[np.floating]]:
         """
         Ensure closure, drop zero-length segments, and drop redundant middle points
         on vertical/horizontal runs. Returns cleaned (r,z).
         """
         # Exact-closure check
+        abs_tol = self.tol.closed_path_tol
         end_gap = float(np.hypot(rpts[-1] - rpts[0], zpts[-1] - zpts[0]))
         if end_gap > abs_tol:
             utils.logger.warn(f"First and last wall points not equal within tol {abs_tol} (gap={end_gap}). "
@@ -97,6 +110,7 @@ class PolygonBoundary:
 
         # Drop unnecessary middle points on straight vertical/horizontal runs
         #TODO: Update for angled lines, not just horz/vert? Use PATH_ANGLE_TOL for colinear check?
+        #TODO: Dont just use abs_tol here? Could need to be zero when abs_tol isnt anymore...
         drop_mid_r = (np.abs(np.diff(rpts[:-1])) <= abs_tol) & (np.abs(np.diff(rpts[1:])) <= abs_tol)
         drop_mid_z = (np.abs(np.diff(zpts[:-1])) <= abs_tol) & (np.abs(np.diff(zpts[1:])) <= abs_tol)
         drop_mid = np.concatenate([[False], drop_mid_r | drop_mid_z, [False]])
@@ -122,8 +136,9 @@ class PolygonBoundary:
         Vectorized point-in-polygon check with an inside bias.
         Works with any dimensional set of points.
         """
-        #Broadcast to a common shape. Raises if shapes incompatible.
-        rb, zb = np.broadcast_arrays(rpts, zpts)
+        #TODO: Is it ok to bias points on border is inner? Forces bounds calc at next point,
+        #but this means the plasma solver is called on the border? Is that ok?
+        rb, zb = np.broadcast_arrays(rpts, zpts) #Broadcast to a common shape.
         pts    = np.column_stack([rb.ravel(), zb.ravel()])
         inside = self.path.contains_points(pts, radius=float(self.tol.path_edge_bias))
         inside = inside.reshape(rb.shape)
@@ -231,12 +246,9 @@ class PolygonBoundary:
         #Get image points from ghost cells and wall points.
         Rg = rpts[ghost_mask]
         Zg = zpts[ghost_mask]
-        Rb   = np.empty_like(Rg)
-        Zb   = np.empty_like(Zg)
-        Rimg = np.empty_like(Rg)
-        Zimg = np.empty_like(Zg)
-        Rn   = np.empty_like(Rb)
-        Zn   = np.empty_like(Rb)
+        Rb, Zb     = np.empty_like(Rg), np.empty_like(Zg)
+        Rimg, Zimg = np.empty_like(Rg), np.empty_like(Zg)
+        Rn, Zn     = np.empty_like(Rb), np.empty_like(Zb)
         for k, (rgi, zgi) in enumerate(zip(Rg, Zg)):
             (Rb[k], Zb[k]), (Rimg[k], Zimg[k]), (Rn[k], Zn[k]) = self._reflect_ghost_across_wall(rgi, zgi)
 

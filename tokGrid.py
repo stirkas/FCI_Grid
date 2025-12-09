@@ -67,7 +67,7 @@ def main(args):
     maps, metrics = tok_grid.generate_maps()
 
     #Generate perp weights from ghost points/BCs.
-    tok_grid.generate_bounds(maps)
+    tok_grid.generate_bounds(maps, metrics)
     #Generate parallel weights.
     #TODO: Not used by BOUT++ yet. Uses hermite-spline interp by default.
     par_wghts = weights.calc_par_weights(maps)

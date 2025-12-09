@@ -11,7 +11,7 @@
          "program": "${file}",
          "console": "integratedTerminal",
          "cwd": "${workspaceFolder}",          // set working dir if you use relative paths
-         "args": ["--debug", "--nr=64", "--nz=68"]
+         "args": ["--debug"]
       },
    ]
 }

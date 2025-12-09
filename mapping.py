@@ -1,11 +1,12 @@
 import numpy as np
 from scipy import interpolate
 
+import boundary as bdy
 import utils
 
 class CoordinateMapping(object):
     """Represents a coordinate mapping from cartesian R,Z to normalized x,z coordinates."""
-    def __init__(self, nx, nz, dx, dz, RR, ZZ):
+    def __init__(self, nx, nz, dx, dz, RR, ZZ, bdry):
         #TODO: Dont need to pass all this in? But dont need to duplicate logic to create these?
         self.nx = nx
         self.nz = nz
@@ -22,8 +23,10 @@ class CoordinateMapping(object):
         self.spl_x = interpolate.RectBivariateSpline(self.xinds, self.zinds, self.RR)
         self.spl_z = interpolate.RectBivariateSpline(self.xinds, self.zinds, self.ZZ)
 
+        self.bdry = self._map_bdy(bdry)
+
         #Generate metric.
-        self.J, self.metric = self._make_metric()
+        self.metric = self._make_metric()
 
         #Calculate finite volume operators. #TODO: Only really needs to happen in center...
         #So call from outside or do outside from metric?
@@ -50,6 +53,22 @@ class CoordinateMapping(object):
         Z = self.spl_z(self.xinds, self.zinds, dx=dx, dy=dz, grid=True)
 
         return np.asarray(R), np.asarray(Z)
+    
+    def _map_bdy(self, bdry):
+        """Take the boundary in (R,Z) coordinates and map to (x,z)
+        to handle cut cell methods for finite volume operators."""
+        R_min, R_max = 1.0, 4.0
+        Z_min, Z_max = -1.5, 1.5
+
+        L_R = R_max - R_min
+        L_Z = Z_max - Z_min
+
+        Rb = np.asarray(bdry.path.vertices[:,0])
+        Zb = np.asarray(bdry.path.vertices[:,1])
+        x_boundary = (Rb - R_min) / L_R
+        z_boundary = (Zb - Z_min) / L_Z
+
+        return bdy.PolygonBoundary(x_boundary, z_boundary)
 
     def _make_metric(self):
         """Return the metric tensor, dx and dz
@@ -92,8 +111,9 @@ class CoordinateMapping(object):
         metric = {"dx": self.dx, "dz": self.dz,
                   "gxx": gxx, "g_xx": g_xx,
                   "gxz": gxz, "g_xz": g_xz,
-                  "gzz": gzz, "g_zz": g_zz}
-        return jac, metric
+                  "gzz": gzz, "g_zz": g_zz,
+                  "J": jac}
+        return metric
     
     
     def _calc_vol(self):
@@ -102,8 +122,9 @@ class CoordinateMapping(object):
         Rc, Jp can be (nx,nz) arrays; dx,dz are logical spacings.
         Multiply by 2*pi for full volume.
         """
-        return self.J*self.dx*self.dz
-        #return self.RR*self.J*self.dx*self.dz
+        return self.metric["J"]*self.dx*self.dz
+        #return self.RR*self.metric["J"]*self.dx*self.dz
+        #TODO: Add toroidal flag for this, and field, and face factors below.
     
     def _face_metrics(self):
         """
@@ -228,17 +249,12 @@ class CoordinateMapping(object):
 
         utils.logger.info("Padding finite volume operators to 0 at outer Lx/Lz edges. "
                           "Does not affect immersed boundary if further in.")
-        dagp_fv_XX = self._pad_to_full(fac_XX * Lz_x) # * Rx_face)
-        dagp_fv_XZ = self._pad_to_full(fac_XZ * Lz_x) # * Rx_face)
-        dagp_fv_ZZ = self._pad_to_full(fac_ZZ * Lx_z, dim='z') # * Rz_face, dim='z')
-        dagp_fv_ZX = self._pad_to_full(fac_ZX * Lx_z, dim='z') # * Rz_face, dim='z')
 
-        dagp_vars = {
-            "dagp_fv_XX": dagp_fv_XX,
-            "dagp_fv_XZ": dagp_fv_XZ,
-            "dagp_fv_ZX": dagp_fv_ZX,
-            "dagp_fv_ZZ": dagp_fv_ZZ,
-            "dagp_fv_volume": dagp_fv_volume
-        }
+        dagp_vars = dict(
+            dagp_fv_XX = self._pad_to_full(fac_XX*Lz_x), #*Rx_face)
+            dagp_fv_XZ = self._pad_to_full(fac_XZ*Lz_x), #*Rx_face)
+            dagp_fv_ZZ = self._pad_to_full(fac_ZZ*Lx_z, dim='z'), #*Rz_face)
+            dagp_fv_ZX = self._pad_to_full(fac_ZX*Lx_z, dim='z'), #*Rz_face)
+            dagp_fv_volume = dagp_fv_volume)
 
         return dagp_vars
