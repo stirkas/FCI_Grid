@@ -19,139 +19,6 @@ import weights
 
 import numpy as np
 
-def rect_boundary_points_on_faces(R_centers, Z_centers, R0, Z0, n_half=5.5,
-                                  include_corners=True, closed=False, ccw=True):
-    """
-    Build a rectangle (square if ΔR==ΔZ) centered near (R0,Z0) whose edges lie on faces
-    at ±n_half cells (e.g., n_half=5.5). Samples along each edge at *center* locations,
-    so the points align with your stagger (R centers, Z centers).
-
-    R_centers: 1D array of R cell centers (length nr_total, incl. ghosts)
-    Z_centers: 1D array of Z cell centers (length nz_total, incl. ghosts)
-    R0, Z0   : target center (in same units as arrays)
-    n_half   : half-side in cells (5.5 puts edges on faces)
-    """
-    # find nearest center indices to the requested center
-    ic = int(np.argmin(np.abs(R_centers - R0)))
-    jc = int(np.argmin(np.abs(Z_centers - Z0)))
-
-    # how many *center* steps to sample along each side
-    m = int(2 * n_half)          # e.g. 11 samples per side
-    off = int(np.floor(n_half))  # 5 for 5.5
-
-    # sanity: ensure we have room in the arrays (ghosts usually make this true)
-    if ic - off - 1 < 0 or ic + off + 1 >= len(R_centers):
-        raise IndexError("Not enough R ghost cells to place ±n_half faces.")
-    if jc - off - 1 < 0 or jc + off + 1 >= len(Z_centers):
-        raise IndexError("Not enough Z ghost cells to place ±n_half faces.")
-
-    # center sequences (length m) used for sampling along the edges
-    R_seq = R_centers[ic - off : ic + off + 1]   # R centers: ic-5 .. ic+5
-    Z_seq = Z_centers[jc - off : jc + off + 1]   # Z centers: jc-5 .. jc+5
-
-    # face coordinates at ±5.5 cells from center
-    # right face between ic+5 and ic+6; left face between ic-6 and ic-5
-    R_face_right = 0.5 * (R_centers[ic + off] + R_centers[ic + off + 1])
-    R_face_left  = 0.5 * (R_centers[ic - off - 1] + R_centers[ic - off])
-    # top face between jc+5 and jc+6; bottom between jc-6 and jc-5
-    Z_face_top    = 0.5 * (Z_centers[jc + off] + Z_centers[jc + off + 1])
-    Z_face_bottom = 0.5 * (Z_centers[jc - off - 1] + Z_centers[jc - off])
-
-    # build edges in CCW order: Top, Right, Bottom, Left
-    r_top = R_seq
-    z_top = np.full(m, Z_face_top)
-    nr_top = np.zeros(m);  nz_top = np.ones(m)
-
-    r_right = np.full(m, R_face_right)
-    z_right = Z_seq[::-1]               # go downwards for CCW
-    nr_right = np.ones(m); nz_right = np.zeros(m)
-
-    r_bot = R_seq[::-1]
-    z_bot = np.full(m, Z_face_bottom)
-    nr_bot = np.zeros(m);  nz_bot = -np.ones(m)
-
-    r_left = np.full(m, R_face_left)
-    z_left = Z_seq
-    nr_left = -np.ones(m); nz_left = np.zeros(m)
-
-    # arc-length weights (use local spacings in case ghosts differ)
-    dR = R_centers[ic + 1] - R_centers[ic]
-    dZ = Z_centers[jc + 1] - Z_centers[jc]
-    w_top = np.full(m, dR)
-    w_bot = np.full(m, dR)
-    w_right = np.full(m, dZ)
-    w_left  = np.full(m, dZ)
-
-    # concatenate
-    r_blocks  = [r_top,   r_right, r_bot,   r_left]
-    z_blocks  = [z_top,   z_right, z_bot,   z_left]
-    nr_blocks = [nr_top,  nr_right, nr_bot,  nr_left]
-    nz_blocks = [nz_top,  nz_right, nz_bot,  nz_left]
-    w_blocks  = [w_top,   w_right, w_bot,   w_left]
-
-    if include_corners:
-        # Explicit corners
-        RT_r, RT_z = R_face_right, Z_face_top
-        RB_r, RB_z = R_face_right, Z_face_bottom
-        LB_r, LB_z = R_face_left,  Z_face_bottom
-        LT_r, LT_z = R_face_left,  Z_face_top
-
-        # Start at top-left corner so the first edge (Top) has a corner before it
-        r_list = [np.array([LT_r])]; z_list = [np.array([LT_z])]
-        # corner normal: use upcoming edge's normal (Top)
-        nr_list = [nr_blocks[0][0:1]]; nz_list = [nz_blocks[0][0:1]]
-        w_list  = [np.array([0.0])]
-
-        # Top edge, then top-right corner
-        r_list += [r_blocks[0], np.array([RT_r])]
-        z_list += [z_blocks[0], np.array([RT_z])]
-        nr_list += [nr_blocks[0], nr_blocks[1][0:1]]
-        nz_list += [nz_blocks[0], nz_blocks[1][0:1]]
-        w_list  += [w_blocks[0], np.array([0.0])]
-
-        # Right edge, then bottom-right corner
-        r_list += [r_blocks[1], np.array([RB_r])]
-        z_list += [z_blocks[1], np.array([RB_z])]
-        nr_list += [nr_blocks[1], nr_blocks[2][0:1]]
-        nz_list += [nz_blocks[1], nz_blocks[2][0:1]]
-        w_list  += [w_blocks[1], np.array([0.0])]
-
-        # Bottom edge, then bottom-left corner
-        r_list += [r_blocks[2], np.array([LB_r])]
-        z_list += [z_blocks[2], np.array([LB_z])]
-        nr_list += [nr_blocks[2], nr_blocks[3][0:1]]
-        nz_list += [nz_blocks[2], nz_blocks[3][0:1]]
-        w_list  += [w_blocks[2], np.array([0.0])]
-
-        # Left edge (ends back at top-left corner if closed=True)
-        r_list += [r_blocks[3]]
-        z_list += [z_blocks[3]]
-        nr_list += [nr_blocks[3]]
-        nz_list += [nz_blocks[3]]
-        w_list  += [w_blocks[3]]
-
-        r   = np.concatenate(r_list)
-        z   = np.concatenate(z_list)
-        n_r = np.concatenate(nr_list)
-        n_z = np.concatenate(nz_list)
-        w   = np.concatenate(w_list)
-    else:
-        r   = np.concatenate(r_blocks)
-        z   = np.concatenate(z_blocks)
-        n_r = np.concatenate(nr_blocks)
-        n_z = np.concatenate(nz_blocks)
-        w   = np.concatenate(w_blocks)
-
-    if not ccw:
-        r, z, n_r, n_z, w = r[::-1], z[::-1], n_r[::-1], n_z[::-1], w[::-1]
-
-    if closed:
-        r = np.append(r, r[0]); z = np.append(z, z[0])
-        n_r = np.append(n_r, n_r[0]); n_z = np.append(n_z, n_z[0])
-        w = np.append(w, 0.0)
-
-    return r, z, n_r, n_z, w
-
 def circle_boundary_points(R0, Z0, a, N=512, theta0=0.0, theta1=2*np.pi, closed=False, ccw=True):
     """
     Return r,z points on a circle centered at (R0,Z0) with radius a.
@@ -215,12 +82,12 @@ class StructuredPoloidalGrid(object):
         self.MRG, self.MYG, self.MZG = MRG, MYG, MZG
         self.nr = nr + 2*self.MRG
         self.nz = nz + 2*self.MZG
-        self.dR = self.Lr/nr
-        self.dZ = self.Lz/nz
+        self.dR = 1/nr #self.Lr/nr
+        self.dZ = 1/nz #self.Lz/nz
         #TODO Create R and Z like this to match hermes/BOUT output.
         #TODO With z not periodic its preferable to keep the endpoint, no? Does anything in BOUT change?
-        self.R  = eq_data.rmin + (0.5 + np.arange(0,nr))*self.dR
-        self.Z  = eq_data.zmin + np.arange(0,nz)*self.dZ
+        self.R  = (0.5 + np.arange(0,nr))*self.dR # eq_data.rmin + 
+        self.Z  = np.arange(0,nz)*self.dZ         # eq_data.zmin + 
         ghosts_lo_R = self.R[0]  - self.dR*np.arange(self.MRG, 0, -1)
         ghosts_lo_Z = self.Z[0]  - self.dZ*np.arange(self.MZG, 0, -1)
         ghosts_hi_R = self.R[-1] + self.dR*np.arange(1, self.MRG+1)
@@ -254,11 +121,31 @@ class StructuredPoloidalGrid(object):
         #    (self.R0 + self.Lr/4 - self.dR/4, self.Z0 + self.Lr/4 + self.dZ/4),
         #    (self.R0 + self.Lr/4 - self.dR/4, self.Z0 - self.Lr/4 - self.dZ/4)
         #]).T
-        r, z, n_r, n_z, w = circle_boundary_points(self.rmid, self.zmid, a=self.Lr/3, N=512)
+        ##Rotate square to diamond.
+        ## Shift to origin (center at 0,0)
+        #r0 = r - self.R0
+        #z0 = z - self.Z0
+        ## Rotation by +45 degrees: (r,z) → (r',z')
+        #cos45 = 1/np.sqrt(2)
+        #sin45 = 1/np.sqrt(2)
+        #r_rot =  r0 * cos45 - z0 * sin45
+        #z_rot =  r0 * sin45 + z0 * cos45
+        ## Shift back to center
+        #r_rot += self.R0
+        #z_rot += self.Z0
+        #r,z = r_rot,z_rot
+        #print(r)
+        #print(z)
+
+        a = 1/3 #0.2*3 #self.Lr/3
+        #r, z, n_r, n_z, w = circle_boundary_points(self.rmid, self.zmid, a=a, N=512)
+        #print("circle info (R0, Z0, a): ", self.rmid, self.zmid, a)
+        print(self.rmid, self.zmid, a)
+        r, z, n_r, n_z, w = circle_boundary_points(self.rmid, self.zmid, a, N=512)
 
         #Create the separatrix and wall boundaries. #TODO: Separate to device class? Which holds grid, boundaries, field, etc.
-        print("Generating separatrix boundary path...") #1.75, 3.25
-        self.sep_idx = np.argmax(eq_data.rbdy)          #-0.77205882, 0.77205882
+        print("Generating separatrix boundary path...")
+        self.sep_idx = np.argmax(eq_data.rbdy)
         self.sptx = bdy.PolygonBoundary(eq_data.rbdy, eq_data.zbdy)
         print("Generating wall boundary path...")
         self.wall = bdy.PolygonBoundary(r,z)
@@ -407,7 +294,7 @@ class StructuredPoloidalGrid(object):
         Zbwd = bwdPts[:,1].reshape(self.nr, self.nz)
 
         return Rfwd, Zfwd, Rbwd, Zbwd
-    
+
     def generate_bounds(self, maps, metrics):
         print("Generating ghost cell image points and boundary data...")
         #TODO: Create a vector data class for points. Use inside get_image_pts.
@@ -427,31 +314,6 @@ class StructuredPoloidalGrid(object):
         #Get indices required for interpolation.
         indr_i, indz_i = self._find_index(Ri, Zi, bound=False)
         wghts, wghts_in, num_wghts = weights.calc_perp_weights(indr_i, indz_i, in_mask)
-
-        #TODO: Should this logic be handled by boundary class? If so is there any issue doing this after dagp vars are already padded.
-        #TODO: Just dont want to have to pass the boundary in for this to work now.
-        #TODO: Need to get matplotlib Path as well not just boundary points, but grid handles that...
-        #TODO: Clean up ChatGPTs algorithm for this method.
-        #TODO: Note this only applies to the central plane currently. But dont need FV operators on fwd/bwd planes.
-        vol_frac, fx_plus_frac, fz_plus_frac = cc.compute_cutcell_fractions(
-            self.R, self.Z, self.dR, self.dZ, self.wall)
-        vol_frac, fx_plus_frac, fz_plus_frac = self.make_3d(vol_frac), \
-            self.make_3d(fx_plus_frac), self.make_3d(fz_plus_frac)
-
-        #Update finite volume face/vol quantities.
-        maps["dagp_fv_XX"] *= fx_plus_frac
-        maps["dagp_fv_XZ"] *= fx_plus_frac
-        maps["dagp_fv_ZX"] *= fz_plus_frac
-        maps["dagp_fv_ZZ"] *= fz_plus_frac
-        maps["dagp_fv_volume"] *= vol_frac
-
-        #Useful to store for post processing.
-        maps.update({
-            "vol_frac": vol_frac,
-            "face_fac_x": fx_plus_frac,
-            "face_fac_z": fz_plus_frac
-        })
-
         #TODO: Add debug check for images missing 4 corners if need more ghosts.
         #TODO: How to deal with image points on boundary? Can happen because if gridpt == boundry then considered inside.
         #TODO: So really how to deal with grid points on boundary too.
@@ -468,6 +330,32 @@ class StructuredPoloidalGrid(object):
             "nw":          num_wghts,
             "is_plasma":   wghts_in.astype(np.float64),
             "weights":     wghts})
+
+        #TODO: Should this logic be handled by boundary class? If so is there any issue doing this after dagp vars are already padded.
+        #Just dont want to have to pass the boundary in for this to work now.
+        #TODO: Fix 32x32 circle bug with cut-cell at the top I think it was?
+        vol_frac, fx_plus_frac, fz_plus_frac, geom = cc.compute_cutcell_fractions_with_bound(
+            self.R, self.Z, self.dR, self.dZ, self.wall)
+        vol_frac, fx_plus_frac, fz_plus_frac = self.make_3d(vol_frac), \
+            self.make_3d(fx_plus_frac), self.make_3d(fz_plus_frac)
+        
+        #Update finite volume face/vol quantities.
+        maps["dagp_fv_XX"] *= fx_plus_frac
+        maps["dagp_fv_XZ"] *= fx_plus_frac
+        maps["dagp_fv_ZX"] *= fz_plus_frac
+        maps["dagp_fv_ZZ"] *= fz_plus_frac
+        maps["dagp_fv_volume"] *= vol_frac
+
+        #Useful to store for post processing.
+        maps.update({
+            "vol_frac": vol_frac,
+            "face_fac_x": fx_plus_frac,
+            "face_fac_z": fz_plus_frac
+        })
+        
+        #Store cut-cell boundary info
+        geom["bound_id"] = self.make_3d(geom["bound_id"]).astype(np.float64) #TODO: Find better way to do this?
+        maps.update(geom)
 
     def generate_maps(self):
         print("Generating metric and map data for output file...")

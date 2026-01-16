@@ -12,6 +12,142 @@ OUTSIDE = 0
 INSIDE  = 1
 CUT     = 2
 
+def segment_intersection(p, r, q, s, eps=1e-14):
+    """
+    Intersection of segments p->p+r and q->q+s.
+    Returns (hit, pt). pt is intersection point.
+    """
+    p = np.asarray(p, float); r = np.asarray(r, float)
+    q = np.asarray(q, float); s = np.asarray(s, float)
+
+    rxs = r[0]*s[1] - r[1]*s[0]
+    if abs(rxs) < eps:
+        return False, None  # parallel/colinear; ignore
+
+    qmp = q - p
+    t = (qmp[0]*s[1] - qmp[1]*s[0]) / rxs
+    u = (qmp[0]*r[1] - qmp[1]*r[0]) / rxs
+
+    if -1e-12 <= t <= 1.0 + 1e-12 and -1e-12 <= u <= 1.0 + 1e-12:
+        t = min(max(t, 0.0), 1.0)
+        pt = p + t*r
+        return True, pt
+
+    return False, None
+
+
+def cell_boundary_intersections(bdry_verts, x_min, x_max, z_min, z_max, eps=1e-14):
+    """
+    Intersect boundary polygon edges with the cell rectangle boundary.
+    Returns unique intersection points as (M,2).
+    """
+    bdry_verts = np.asarray(bdry_verts, float)
+    hits = []
+
+    rect = np.array([
+        [x_min, z_min],
+        [x_max, z_min],
+        [x_max, z_max],
+        [x_min, z_max],
+    ], float)
+    rect_edges = [(rect[k], rect[(k+1) % 4]) for k in range(4)]
+
+    n = len(bdry_verts)
+    for k in range(n):
+        p0 = bdry_verts[k]
+        p1 = bdry_verts[(k+1) % n]
+        p = p0
+        r = p1 - p0
+
+        for (q0, q1) in rect_edges:
+            q = q0
+            s = q1 - q0
+            hit, pt = segment_intersection(p, r, q, s, eps=eps)
+            if hit:
+                hits.append(pt)
+
+    if not hits:
+        return np.zeros((0, 2), float)
+
+    hits = np.asarray(hits, float)
+
+    # Deduplicate (corners can create duplicates)
+    uniq = [hits[0]]
+    for h in hits[1:]:
+        if min(np.linalg.norm(h - u) for u in uniq) > 1e-10:
+            uniq.append(h)
+    return np.asarray(uniq, float)
+
+
+def furthest_pair(points):
+    """
+    Choose the two points with maximum separation.
+    points: (M,2)
+    Returns p0, p1 or (None,None) if insufficient.
+    """
+    points = np.asarray(points, float)
+    m = len(points)
+    if m < 2:
+        return None, None
+    if m == 2:
+        return points[0], points[1]
+
+    best = (0, 1)
+    bestd = -1.0
+    for a in range(m):
+        for b in range(a+1, m):
+            d = np.linalg.norm(points[a] - points[b])
+            if d > bestd:
+                bestd = d
+                best = (a, b)
+    return points[best[0]], points[best[1]]
+
+def bilinear_base_and_weights(point, xc, zc, dx, dz):
+    """
+    Bilinear interpolation weights for a point (x,z) using *cell-centered* values.
+
+    Returns:
+      i0, j0, w00, w01, w10, w11
+
+    Stencil layout (cell centers):
+        (i0,   j0)     (i0,   j0+1)
+        (i0+1, j0)     (i0+1, j0+1)
+
+    Weight ordering matches C++:
+        w00 * f[i0,   j0]
+      + w01 * f[i0,   j0+1]
+      + w10 * f[i0+1, j0]
+      + w11 * f[i0+1, j0+1]
+    """
+
+    x, z = float(point[0]), float(point[1])
+
+    # Find i0,j0 such that point lies between centers (i0,i0+1), (j0,j0+1)
+    i0 = int(np.floor((x - xc[0]) / dx))
+    j0 = int(np.floor((z - zc[0]) / dz))
+
+    # Clamp so i0+1, j0+1 are valid - unnecessary?
+    #i0 = max(0, min(i0, len(xc) - 2))
+    #j0 = max(0, min(j0, len(zc) - 2))
+
+    # Local coordinates between cell centers
+    x0 = xc[i0]
+    z0 = zc[j0]
+
+    xi  = (x - x0) / dx
+    eta = (z - z0) / dz
+
+    xi  = np.clip(xi, 0.0, 1.0)
+    eta = np.clip(eta, 0.0, 1.0)
+
+    # Weights (NOTE ORDER!)
+    w00 = (1.0 - xi) * (1.0 - eta)   # (i0,   j0)
+    w01 = (1.0 - xi) * eta           # (i0,   j0+1)
+    w10 = xi * (1.0 - eta)           # (i0+1, j0)
+    w11 = xi * eta                   # (i0+1, j0+1)
+
+    return i0, j0, w00, w01, w10, w11
+
 def classify_cell(bdry: bdy.PolygonBoundary,
                   x_min, x_max, z_min, z_max,
                   bbox, eps=1e-12):
@@ -415,7 +551,6 @@ def compute_cutcell_fractions(xc, zc, dx, dz, bdry: bdy.PolygonBoundary):
                 fz_plus_frac[i,j] = 0.0
 
     #Clip to possibly avoid numerical issues.
-    print("Total Volume: ", np.sum(vol_frac*dx*dz))
     vol_frac = clip_cuts(vol_frac)
     fx_plus_frac = clip_cuts(fx_plus_frac)
     fz_plus_frac = clip_cuts(fz_plus_frac)
@@ -423,7 +558,8 @@ def compute_cutcell_fractions(xc, zc, dx, dz, bdry: bdy.PolygonBoundary):
     if (utils.DEBUG_FLAG):
         print("Plotting cut cell volume fractions and faces...")
         plot_volume_fractions(xc, zc, dx, dx, vol_frac, bdry)
-        plot_cut_faces(xc, zc, dx, dz, fx_plus_frac, fz_plus_frac, bdry)
+        plot_cut_faces(
+            xc, zc, dx, dz, fx_plus_frac, fz_plus_frac, bdry)
 
     #TODO: Temporary fix since BOUT runs cells outside the wall too right now. Dont divide by zero volume.
     vol_eps = 1e-12
@@ -432,6 +568,206 @@ def compute_cutcell_fractions(xc, zc, dx, dz, bdry: bdy.PolygonBoundary):
     vol_frac[out_mask] = 1.0
 
     return vol_frac, fx_plus_frac, fz_plus_frac
+
+#TODO: Go through new code compared to old function and figure out what should be cleaned up from ChatGPT...
+def compute_cutcell_fractions_with_bound(
+    xc, zc, dx, dz, bdry: bdy.PolygonBoundary):
+    """
+    Pure (R,Z) version.
+
+    Returns:
+      (vol_frac, fx_plus_frac, fz_plus_frac) if return_geom==False
+      (vol_frac, fx_plus_frac, fz_plus_frac, geom) if return_geom==True
+
+    geom includes EB midpoint/normal and bilinear interpolation weights for two
+    points along inward normal for each CUT cell.
+    """
+    import numpy as np
+
+    nx = len(xc)
+    nz = len(zc)
+
+    vol_frac     = np.zeros((nx, nz), dtype=float)
+    fx_plus_frac = np.zeros((nx, nz), dtype=float)  # padded to (nx,nz)
+    fz_plus_frac = np.zeros((nx, nz), dtype=float)
+
+    # ---- geometry outputs ----
+    bound_id = -np.ones((nx, nz), dtype=np.int32)
+    cc_mask = np.zeros((nx, nz), float)
+
+    # Debug arrays for plotting
+    eb_p0x = np.zeros((nx, nz), float); eb_p0z = np.zeros((nx, nz), float)
+    eb_p1x = np.zeros((nx, nz), float); eb_p1z = np.zeros((nx, nz), float)
+    eb_mx  = np.zeros((nx, nz), float); eb_mz  = np.zeros((nx, nz), float)
+    eb_nx  = np.zeros((nx, nz), float); eb_nz  = np.zeros((nx, nz), float)
+    eb_len = np.zeros((nx, nz), float)
+
+    pAx = np.zeros((nx, nz), float); pAz = np.zeros((nx, nz), float)
+    pBx = np.zeros((nx, nz), float); pBz = np.zeros((nx, nz), float)
+
+    # packed lists (nb-long)
+    mid_pts = []
+    norms = []
+    base_inds = []
+    weights = []
+    ds_list = []
+    cell_inds = []
+    segLs = []
+
+    b = 0  # running boundary-cut index
+    h = np.hypot(dx, dz) #Normal sampling distance for midpoints.
+    s1, s2 = 0.5*h, h
+
+    # bbox for quick cell classification
+    px_min, pz_min = bdry.path.vertices.min(axis=0)
+    px_max, pz_max = bdry.path.vertices.max(axis=0)
+    bbox = (px_min, px_max, pz_min, pz_max)
+
+    for i in range(nx):
+        x_min = xc[i] - 0.5 * dx
+        x_max = xc[i] + 0.5 * dx
+        for j in range(nz):
+            z_min = zc[j] - 0.5 * dz
+            z_max = zc[j] + 0.5 * dz
+
+            cls = classify_cell(bdry, x_min, x_max, z_min, z_max, bbox)
+
+            if cls == OUTSIDE:
+                continue
+
+            if cls == INSIDE:
+                vol_frac[i, j] = 1.0
+                fx_plus_frac[i, j] = 1.0
+                fz_plus_frac[i, j] = 1.0
+                continue
+
+            # ---- CUT cell volume + face fractions ----
+            cell_poly = clip_polygon_to_rect(
+                bdry.path.vertices, x_min, x_max, z_min, z_max
+            )
+            A = polygon_area(cell_poly)
+            vol_frac[i, j] = A / (dx * dz)
+
+            if i < nx - 1:
+                fx_plus_frac[i, j] = face_fraction_plus_x(
+                    cell_poly, x_max, z_min, z_max, dz
+                )
+            else:
+                fx_plus_frac[i, j] = 0.0
+
+            if j < nz - 1:
+                fz_plus_frac[i, j] = face_fraction_plus_z(
+                    cell_poly, x_min, x_max, z_max, dx
+                )
+            else:
+                fz_plus_frac[i, j] = 0.0
+
+            # ---- EB endpoints inside this cell ----
+            hits = cell_boundary_intersections(
+                bdry.path.vertices, x_min, x_max, z_min, z_max
+            )
+            p0, p1 = furthest_pair(hits)
+
+            if p0 is None:
+                # degenerate grazing case
+                continue
+
+            seg = p1 - p0
+            segL = np.linalg.norm(seg)
+            if segL < 1e-14:
+                continue
+
+            mid = 0.5 * (p0 + p1)
+
+            # normal from segment tangent
+            t = seg / segL
+            n = np.array([-t[1], t[0]], float)  # candidate normal (not yet oriented)
+
+            # orient to point inward (into plasma) using a finite step (more robust than tiny epsilon)
+            pA_test = mid + s1 * n
+            pB_test = mid + s2 * n
+            #TODO: What to do if res too low and points outside? Need to handle both checks.
+            if (not bdry.contains(pA_test[0], pA_test[1])):
+                n = -n
+
+            # sample points along inward normal in RZ
+            pA = mid + s1 * n
+            pB = mid + s2 * n
+
+            # bilinear interpolation weights in RZ (assumes xc/zc are uniform grids in RZ)
+            ai0, aj0, aw00, aw01, aw10, aw11 = bilinear_base_and_weights(
+                pA, xc, zc, dx, dz
+            )
+            bi0, bj0, bw00, bw01, bw10, bw11 = bilinear_base_and_weights(
+                pB, xc, zc, dx, dz
+            )
+
+            # store debug arrays
+            #TODO: Store more like mid_pts below. Dont need so many structures.
+            eb_p0x[i, j], eb_p0z[i, j] = p0
+            eb_p1x[i, j], eb_p1z[i, j] = p1
+            eb_mx[i, j],  eb_mz[i, j]  = mid
+            eb_nx[i, j],  eb_nz[i, j]  = n
+            eb_len[i, j] = segL
+
+            pAx[i, j], pAz[i, j] = pA
+            pBx[i, j], pBz[i, j] = pB
+
+            # record boundary cut index
+            bound_id[i, j] = b
+            cc_mask[i, j] = 1.0
+
+            mid_pts.append([mid[0], mid[1]])
+            norms.append([n[0], n[1]])
+            base_inds.append([ai0, aj0, bi0, bj0])
+
+            # Pack weights: A then B. (Keep your preferred ordering consistent with C++)
+            # Here: w00,w01,w10,w11 for each point
+            weights.append([aw00, aw01, aw10, aw11,
+                            bw00, bw01, bw10, bw11])
+
+            ds_list.append(s2 - s1)
+            segLs.append(segL)
+            cell_inds.append([i, j])
+
+            b += 1
+
+    # Clip fractions to [0,1]
+    vol_frac = clip_cuts(vol_frac)
+    fx_plus_frac = clip_cuts(fx_plus_frac)
+    fz_plus_frac = clip_cuts(fz_plus_frac)
+
+    # Safety hack you had: avoid divide-by-zero later
+    vol_eps = 1e-12
+    out_mask = vol_frac < vol_eps
+    vol_frac[out_mask] = 1.0
+
+    if utils.DEBUG_FLAG:
+        print("Plotting cut cell volume fractions and faces...")
+        plot_volume_fractions(xc, zc, dx, dz, vol_frac, bdry)
+        plot_cut_faces(
+            xc, zc, dx, dz, fx_plus_frac, fz_plus_frac, bdry,
+            cc_mask=cc_mask,
+            eb_p0x=eb_p0x, eb_p0z=eb_p0z, eb_p1x=eb_p1x, eb_p1z=eb_p1z,
+            eb_mx=eb_mx, eb_mz=eb_mz, eb_nx=eb_nx, eb_nz=eb_nz,
+            pAx=pAx, pAz=pAz, pBx=pBx, pBz=pBz)
+
+    geom = {
+        "bound_id": bound_id,
+        "nb": b,
+        "mid_pts": np.asarray(mid_pts, float),     # (nb,2) in RZ
+        "bnorms":  np.asarray(norms, float),       # (nb,2) in RZ (unit-ish; depends on cell scaling)
+        "bd_len":  np.asarray(segLs, float),       # (nb,) in RZ
+        "s1": float(s1),
+        "s2": float(s2),
+        "ds": np.asarray(ds_list, float),
+        "bweights": np.asarray(weights, float),    # (nb,8) A(4) + B(4)
+        "base_inds": np.asarray(base_inds, float),   # (nb,4)
+        "cell_inds": np.asarray(cell_inds, int),   # (nb,2)
+        "cc_mask": cc_mask,
+    }
+
+    return vol_frac, fx_plus_frac, fz_plus_frac, geom
 
 def clip_cuts(arr, clip_eps=1e-12):
     """
@@ -491,7 +827,11 @@ def plot_volume_fractions(xc, zc, dx, dz, vol_frac, bdry: bdy.PolygonBoundary = 
     plt.show()
 
 def plot_cut_faces(xc, zc, dx, dz, fx_plus_frac, fz_plus_frac,
-                   bdry: bdy.PolygonBoundary, eps=1e-12):
+                   bdry: bdy.PolygonBoundary, eps=1e-12,
+                   cc_mask=None,
+                   eb_p0x=None, eb_p0z=None, eb_p1x=None, eb_p1z=None,
+                   eb_mx=None, eb_mz=None, eb_nx=None, eb_nz=None,
+                   pAx=None, pAz=None, pBx=None, pBz=None):
     """
     Visualize cut-cell faces:
 
@@ -648,6 +988,65 @@ def plot_cut_faces(xc, zc, dx, dz, fx_plus_frac, fz_plus_frac,
     ax.set_xlabel("x (logical)")
     ax.set_ylabel("z (logical)")
     ax.set_title("Cut Faces")
+
+    # --- NEW: draw EB segment in each cut cell + normal + sample points ---
+    if cc_mask is not None:
+        cc_mask = np.asarray(cc_mask)
+
+        eb_segments = []
+        mids = []
+        norms = []
+        ptsA = []
+        ptsB = []
+
+        nx = len(xc)
+        nz = len(zc)
+        for i in range(nx):
+            for j in range(nz):
+                if cc_mask[i, j] != 1:
+                    continue
+
+                # EB segment
+                if eb_p0x is not None:
+                    p0 = (eb_p0x[i, j], eb_p0z[i, j])
+                    p1 = (eb_p1x[i, j], eb_p1z[i, j])
+                    eb_segments.append([p0, p1])
+
+                # midpoint + normal
+                if eb_mx is not None:
+                    mids.append((eb_mx[i, j], eb_mz[i, j]))
+                    norms.append((eb_nx[i, j], eb_nz[i, j]))
+
+                # sample points
+                if pAx is not None:
+                    ptsA.append((pAx[i, j], pAz[i, j]))
+                if pBx is not None:
+                    ptsB.append((pBx[i, j], pBz[i, j]))
+
+        if eb_segments:
+            ax.add_collection(LineCollection(eb_segments, colors='magenta', lw=2.0, zorder=6))
+
+        # normal arrows
+        if mids and norms:
+            mids = np.asarray(mids, float)
+            norms = np.asarray(norms, float)
+
+            # pick an arrow scale that looks reasonable
+            arrow_len = 0.35 * min(dx, dz)
+            ax.quiver(
+                mids[:, 0], mids[:, 1],
+                norms[:, 0], norms[:, 1],
+                angles='xy', scale_units='xy', scale=1.0/arrow_len,
+                width=0.003, zorder=7
+            )
+
+        # sample points
+        if ptsA:
+            ptsA = np.asarray(ptsA, float)
+            ax.scatter(ptsA[:, 0], ptsA[:, 1], s=18, marker='o', color='cyan', zorder=8, label='interp A')
+        if ptsB:
+            ptsB = np.asarray(ptsB, float)
+            ax.scatter(ptsB[:, 0], ptsB[:, 1], s=18, marker='x', color='yellow', zorder=8, label='interp B')
 
     # Legend along the top
     legend_lines = [

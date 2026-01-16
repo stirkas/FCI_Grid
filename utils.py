@@ -22,7 +22,7 @@ def unit_vecs(N):
 
 #Utility functions/classes
 #TODO: Put into boundary handler class? With image point calculations.
-def neighbor_mask(point_mask, connectivity=4):
+def neighbor_mask(point_mask, nb_num=1, connectivity=4):
     """
     Given a set of points which are true in point_mask, return a mask with their neighbors.
     Changing connectivity to 8 includes diagonals.
@@ -33,10 +33,10 @@ def neighbor_mask(point_mask, connectivity=4):
     down  = np.zeros_like(point_mask, bool)
     up    = np.zeros_like(point_mask, bool)
 
-    left[1:,:]   = point_mask[:-1,:]
-    right[:-1,:] = point_mask[1:,:]
-    down[:,1:]   = point_mask[:,:-1]
-    up[:,:-1]    = point_mask[:,1:]
+    left[nb_num:,:]   = point_mask[:-nb_num,:]
+    right[:-nb_num,:] = point_mask[nb_num:,:]
+    down[:,nb_num:]   = point_mask[:,:-nb_num]
+    up[:,:-nb_num]    = point_mask[:,nb_num:]
 
     neighbor_any = left | right | up | down
 
@@ -46,10 +46,10 @@ def neighbor_mask(point_mask, connectivity=4):
         dl = np.zeros_like(point_mask, bool)
         dr = np.zeros_like(point_mask, bool)
 
-        ul[1:, 1:]  = point_mask[:-1, :-1]
-        ur[:-1,1:]  = point_mask[1:,  :-1]
-        dl[1:, :-1] = point_mask[:-1, 1: ]
-        dr[:-1,:-1] = point_mask[1:,  1: ]
+        ul[nb_num:, nb_num:]  = point_mask[:-nb_num, :-nb_num]
+        ur[:-nb_num,nb_num:]  = point_mask[nb_num:,  :-nb_num]
+        dl[nb_num:, :-nb_num] = point_mask[:-nb_num, nb_num: ]
+        dr[:-nb_num,:-nb_num] = point_mask[nb_num:,  nb_num: ]
 
         neighbor_any |= (ul | ur | dl | dr)
 

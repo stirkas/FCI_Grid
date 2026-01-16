@@ -225,7 +225,6 @@ def calc_perp_weights(xinds, zinds, in_mask):
     """
     Compute bilinear weights for fractional *index-space* coords (xf, zf).
     Used for ghost cells primarily which only have thin layer so force bilinear.
-    Note, this is equivalent to the Vandermonde solve used in immersed boundary papers (Gheis, Mittal).
 
     Inputs
     ------
