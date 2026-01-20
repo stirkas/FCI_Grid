@@ -1,0 +1,44 @@
+# Stellarator diffusion
+
+nout = 200
+timestep = 5e5
+
+[mesh]
+
+file = "sq_mid_rot_midres.fci.nc"
+
+[mesh:paralleltransform]
+type = fci
+z_periodic = 0
+
+[solver]
+rtol = 1e-9
+atol = 1e-10
+
+[hermes]
+components = h+
+
+Nnorm = 2e18  # Reference density [m^-3]
+Bnorm = 1   # Reference magnetic field [T]
+Tnorm = 5   # Reference temperature [eV]
+
+recalculate_metric = false # Assume a tokomak?
+
+[h+]
+type = evolve_density, anomalous_diffusion_3d
+
+diagnose = 1
+AA = 1
+charge = 1
+anomalous_D = 1 #0.07877942415093483  # Density diffusion [m^2/s]
+anomalous_chi = .4
+#anomalous_nu = 0
+
+[Nh+]
+
+#function = 1 + cos(pi*(x-0.28515625)/0.4921875)*cos(pi*(z-0.24632352999999998)/0.50735294)
+#function = 1 + cos(pi*(x-0.2509765625)/0.498046875)*cos(pi*(z-0.24903846153846154)/0.5019230769230768)
+function = 1  + cos( pi * ( ((x-0.5) + (z-0.5)) * 0.7071067811865475 + 0.5*0.498046875) / 0.498046875)* cos( pi * ( ((x-0.5) - (z-0.5)) * 0.7071067811865475 + 0.5*0.5019230769230768 ) / 0.5019230769230768)
+
+bndry_core = dirichlet(1.0)  # Core boundary high density
+bndry_all = dirichlet(0.1)   # All other boundaries low density
