@@ -100,10 +100,10 @@ class TokamakConfig(SimConfig):
             utils.logger.info("Removing sharp features manually from DIIID wall. Check ok with --debug.")
             targets = np.array([
                 (2.3770,  0.3890),
-                (2.3770, -0.3890),
-                (1.0121,  1.1648),
-                (1.0009,  1.2172),
-                (1.0293,  1.2170)])
+                (2.3770, -0.3890)]) #,
+                #(1.0121,  1.1648),
+                #(1.0009,  1.2172),
+                #(1.0293,  1.2170)])
         elif "TCV" in self.gfile:
             #TCV wall very close to sim domain so check for sufficient grid res.
             #TODO: Dont need nx,ny,nz args if these checks not needed.

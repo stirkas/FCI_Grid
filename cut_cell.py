@@ -1003,7 +1003,7 @@ def compute_cutcell_fractions_with_bound(
                 if ((not bdry.contains(pA[0], pA[1])) or \
                     (not bdry.contains(pB[0], pB[1]))): 
                     utils.logger.warn("Points along boundary normal not outside. Indicates resolution too low."
-                                      f"For boundary midpoint located at {mid[0], mid[1]}")
+                                      f" For boundary midpoint located at {mid[0], mid[1]}")
 
                 # bilinear interpolation weights in RZ (assumes xc/zc are uniform grids in RZ)
                 ai0, aj0, aw00, aw01, aw10, aw11 = bilinear_base_and_weights(

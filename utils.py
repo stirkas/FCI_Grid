@@ -154,7 +154,7 @@ class Tolerances:
         
         if self.closed_path_tol == self.DEFAULT_CLOSED_PATH_TOL:
             logger.warn(f"Using tol of {self.closed_path_tol:f} to check paths are closed. "
-                "This is usually fine for gfiles.")
+                " This is usually fine for gfiles.")
 
 #Define some useful globals.
 DEFAULT_GFILE = "TokData/DIIID/g162940.02944_670"

@@ -90,8 +90,8 @@ class PolygonBoundary:
         end_gap = np.hypot(xpts[-1] - xpts[0], zpts[-1] - zpts[0])
         if end_gap > abs_tol:
             utils.logger.warn(f"First and last wall points not equal within tol {abs_tol} (gap={end_gap}). "
-                f"Closing polygon by appending the first point {(xpts[0],zpts[0])};"
-                f"recommend visual verification of closed wall.")
+                f" Closing polygon by appending the first point {(xpts[0],zpts[0])};"
+                f" recommend visual verification of closed wall.")
             xpts = np.append(xpts, xpts[0])
             zpts = np.append(zpts, zpts[0])
 
