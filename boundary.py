@@ -1,279 +1,146 @@
-import copy
-from typing import Tuple
+"""Boundary geometry and immersed-boundary (IB) helpers.
 
-import numpy as np
-from numpy.typing import NDArray
+This module provides:
+
+- PolygonBoundary: a lightweight polygon boundary in the (x,z) plane that
+  supports point-in-polygon queries and nearest-point projection onto the wall.
+
+- ImmersedBoundary: grid-based immersed-boundary utilities that operate on a
+  boundary-like object (composition). It identifies ghost cells, border cells,
+  and computes wall intercept + image points for ghost cells.
+
+- Geometry (Path construction, cleanup, orientation) lives in
+  PolygonBoundary.
+- ImmersedBoundary does *not* inherit from PolygonBoundary; it takes a boundary
+  object.
+"""
+
+from __future__ import annotations
+from typing import Tuple, TypeAlias
+import copy
+
 from matplotlib.path import Path
 from matplotlib.patches import PathPatch
 from matplotlib import pyplot as plt
+import numpy as np
 
 import utils
+from utils import DataArray, MaskArray
 
-#TODO: Define ImmersedBoundary which inherits from PolygonBoundary and contains image/ghost functionality.
+#Useful type for sets of 2d (x,z usually) data.
+CoordPairs: TypeAlias = Tuple[DataArray, DataArray]
+
 class PolygonBoundary:
-    def __init__(self, rbdy: NDArray[np.floating], zbdy: NDArray[np.floating],
-            tol: utils.Tolerances = utils.DEFAULT_TOL):
-        """
-        Create a polygon boundary defined by (rbdy[i], zbdy[i]) vertices.
+    """Polygon wall boundary in (x,z)."""
 
-        Parameters
-        ----------
-        rbdy, zbdy : array_like (1D)
-            R, Z coordinates of the polygon vertices.
-        tol : Tolerances
-            Numerical tolerances and point-in-polygon bias.
-        """
-        r = np.asarray(rbdy, dtype=float)
+    def __init__(self, xbdy: DataArray, zbdy: DataArray,
+            tol: utils.Tolerances = utils.DEFAULT_TOL) -> None:
+        x = np.asarray(xbdy, dtype=float)
         z = np.asarray(zbdy, dtype=float)
 
-        if r.shape != z.shape:
-            raise ValueError(f"R and Z must have the same shape; got {r.shape} vs {z.shape}")
-        if r.ndim != 1 or r.size < 3:
+        if x.shape != z.shape:
+            raise ValueError(f"x and z must have same shape; got {x.shape} vs {z.shape}")
+        if x.ndim != 1 or x.size < 3:
             raise ValueError("Need 1D arrays with at least 3 vertices for a polygon.")
 
+        #Make a copy of default tolerances, so it can be updated locally.
         self.tol = copy.deepcopy(tol)
 
-        self.rbdy, self.zbdy = self._clean_up_points(r, z)
-        self.num_pts = len(self.rbdy)
+        #Clean up and generate boundary from points.
+        self.xbdy, self.zbdy = self._clean_up_points(x, z)
+        self.num_pts = int(self.xbdy.size)
+
         self.path = self._build_path()
 
-        #Use shoelace formula to check if cw or ccw.
-        x, y = self.path.vertices[:, 0], self.path.vertices[:, 1]
-        area = 0.5 * np.sum(x[:-1] * y[1:] - x[1:] * y[:-1])
-        if np.isclose(area, 0.0, atol=self.tol.path_tol):
-            raise ValueError("Path has zero (or numerically zero) area.")
-        self.ccw = True if np.sign(area) > 0 else False
-        #Now that points exist, set path_edge_bias correctly for cw or ccw.
-        if ((self.ccw == True and np.sign(self.tol.path_edge_bias) < 0) or
-            (self.ccw == False and np.sign(self.tol.path_edge_bias) > 0)):
-                self.tol.path_edge_bias *= -1
+        self.ccw = self._compute_orientation_ccw()
+        #Set edge bias, which depends on orientation.
+        self._set_edge_bias_sign()
 
-        #Store segment vector information.
-        #TODO: Use length functions? Handle vectors consistently...
-        ab = np.column_stack([self.rbdy, self.zbdy])
-        self._a = ab[:-1]                              #Segment start points
-        self._b = ab[1:]                               #Segment end points
-        self._d = self._b - self._a                    #Segment vectors
-        self._dd = np.sum(self._d*self._d, axis=1)     #Segment lengths
-        self._n = self._d / np.sqrt(self._dd)[:, None] #Segment unit vectors
-
-    def _remove_target_pts(self, R, Z, tol=1e-2):
-        #Note: Manual points from default gfile...
-        tcv = False
-        targets = np.array([ #DIIID sharp slots.
-            (2.3770,  0.3890),
-            (2.3770, -0.3890)])
-        #targets = np.array([(1.8747, -0.3847)])
-        #targets = [] 
-        #for i, rpt in enumerate(R):
-        #    if R[i] >= 0.90 and (Z[i] <= -0.23 and Z[i] >= -0.60):
-        #        targets.append((R[i],Z[i]))
-
-        pts = np.column_stack([R, Z])
-        remove = np.zeros(len(pts), dtype=bool)
-        for rt, zt in targets:
-            d2 = (pts[:,0]-rt)**2 + (pts[:,1]-zt)**2
-            j = np.argmin(d2)
-            if d2[j] <= tol**2:
-                remove[j] = True
-        kept = pts[~remove]
-
-        #Fix for TCV shape.
-        if (tcv):
-            for i, kpt in enumerate(kept):
-                if np.abs(kpt[0] - 1.093496) <= 1e-4 and np.abs(kpt[1] - -0.603975) <= 1e-4:
-                    kept[i][0] = kept[i-1][0]
-                    kept[i][1] = -0.526
-
-        return kept[:,0], kept[:,1]
-
-    def _clean_up_points(self, rpts: NDArray[np.floating], zpts: NDArray[np.floating]) \
-                     -> Tuple[NDArray[np.floating], NDArray[np.floating]]:
-        """
-        Ensure closure, drop zero-length segments, and drop redundant middle points
-        on vertical/horizontal runs. Returns cleaned (r,z).
-        """
-        # Exact-closure check
-        abs_tol = self.tol.closed_path_tol
-        end_gap = float(np.hypot(rpts[-1] - rpts[0], zpts[-1] - zpts[0]))
-        if end_gap > abs_tol:
-            utils.logger.warn(f"First and last wall points not equal within tol {abs_tol} (gap={end_gap}). "
-                f"Closing polygon by appending the first point {(rpts[0],zpts[0])}; recommend visual verification of closed wall.")
-            rpts = np.append(rpts, rpts[0])
-            zpts = np.append(zpts, zpts[0])
-
-        # Remove zero-length segments (keep the wraparound final vertex)
-        r_zero = np.abs(np.diff(rpts)) > abs_tol
-        z_zero = np.abs(np.diff(zpts)) > abs_tol
-        keep = np.concatenate([r_zero | z_zero, np.array([True], dtype=bool)])
-        rpts, zpts = rpts[keep], zpts[keep]
-
-        # Drop unnecessary middle points on straight vertical/horizontal runs
-        #TODO: Update for angled lines, not just horz/vert? Use PATH_ANGLE_TOL for colinear check?
-        #TODO: Dont just use abs_tol here? Could need to be zero when abs_tol isnt anymore...
-        drop_mid_r = (np.abs(np.diff(rpts[:-1])) <= abs_tol) & (np.abs(np.diff(rpts[1:])) <= abs_tol)
-        drop_mid_z = (np.abs(np.diff(zpts[:-1])) <= abs_tol) & (np.abs(np.diff(zpts[1:])) <= abs_tol)
-        drop_mid = np.concatenate([[False], drop_mid_r | drop_mid_z, [False]])
-        keep = ~drop_mid
-        rpts, zpts = rpts[keep], zpts[keep]
-
-        #TODO: Remove and reset angle bisection...
-        #rpts, zpts = self._remove_target_pts(rpts, zpts)
-
-        return rpts, zpts
-    
     def _build_path(self) -> Path:
-        """Build a matplotlib Path (from straight line segments) and mark it explicitly closed."""
-        verts = np.column_stack([self.rbdy, self.zbdy])
+        """Build a matplotlib Path from straight line segments and explicitly mark closed."""
+        verts = np.column_stack([self.xbdy, self.zbdy])
         codes = np.full(len(verts), Path.LINETO, dtype=np.uint8)
         #Set start and end vertex information per docs.
         codes[0] = Path.MOVETO
         codes[-1] = Path.CLOSEPOLY
         return Path(verts, codes)
 
-    def contains(self, rpts, zpts) -> NDArray[np.bool_]:
+    def _compute_orientation_ccw(self) -> bool:
+        """Return True if polygon is CCW using shoelace area sign."""
+        x, y = self.path.vertices[:, 0], self.path.vertices[:, 1]
+        area = 0.5 * np.sum(x[:-1] * y[1:] - x[1:] * y[:-1])
+        if np.isclose(area, 0.0, atol=self.tol.path_tol):
+            raise ValueError("Path has zero (or numerically zero) area.")
+        return bool(np.sign(area) > 0)
+
+    def _set_edge_bias_sign(self) -> None:
+        """Flip `path_edge_bias` to be consistent with polygon orientation."""
+        bias_sign = np.sign(self.tol.path_edge_bias)
+        # Convention: bias should point *inside*. If orientation disagrees, flip.
+        if (self.ccw and bias_sign < 0) or ((not self.ccw) and bias_sign > 0):
+            self.tol.path_edge_bias *= -1
+
+    def _clean_up_points(self, xpts: DataArray, zpts: DataArray) -> CoordPairs:
+        """Ensure closure, drop zero-length segments, drop redundant midpoints.
+
+        Returns cleaned (x, z) arrays.
         """
-        Vectorized point-in-polygon check with an inside bias.
-        Works with any dimensional set of points.
+        #Exact-closure check
+        abs_tol = self.tol.closed_path_tol
+        end_gap = np.hypot(xpts[-1] - xpts[0], zpts[-1] - zpts[0])
+        if end_gap > abs_tol:
+            utils.logger.warn(f"First and last wall points not equal within tol {abs_tol} (gap={end_gap}). "
+                f"Closing polygon by appending the first point {(xpts[0],zpts[0])};"
+                f"recommend visual verification of closed wall.")
+            xpts = np.append(xpts, xpts[0])
+            zpts = np.append(zpts, zpts[0])
+
+        #Remove zero-length segments (preserve final closure point)
+        x_ok = np.abs(np.diff(xpts)) > abs_tol
+        z_ok = np.abs(np.diff(zpts)) > abs_tol
+        keep = np.concatenate([x_ok | z_ok, np.array([True], dtype=bool)])
+        xpts, zpts = xpts[keep], zpts[keep]
+
+        #Remove unnecessary points on straight horizontal/vertical runs.
+        #TODO: Clean up slanted lines too? Need angular tolerance.
+        straight_tol = self.tol.path_tol
+        drop_mid_x = (np.abs(np.diff(xpts[:-1])) <= straight_tol) & (np.abs(np.diff(xpts[1:])) <= straight_tol)
+        drop_mid_z = (np.abs(np.diff(zpts[:-1])) <= straight_tol) & (np.abs(np.diff(zpts[1:])) <= straight_tol)
+        drop_mid = np.concatenate([[False], drop_mid_x | drop_mid_z, [False]])
+        keep = ~drop_mid
+        xpts, zpts = xpts[keep], zpts[keep]
+
+        return xpts, zpts
+
+    def contains(self, xpts, zpts, combined: bool = False) -> MaskArray | bool:
         """
-        #TODO: Is it ok to bias points on border is inner? Forces bounds calc at next point,
-        #but this means the plasma solver is called on the border? Is that ok?
-        rb, zb = np.broadcast_arrays(rpts, zpts) #Broadcast to a common shape.
-        pts    = np.column_stack([rb.ravel(), zb.ravel()])
+        Vectorized point-in-polygon check with edge bias.
+        Note, if points on boundary biased inside, then solver
+        needs data at the border to run those cells.
+        """
+        xb, zb = np.broadcast_arrays(xpts, zpts)
+        pts    = np.column_stack([xb.ravel(), zb.ravel()])
         inside = self.path.contains_points(pts, radius=float(self.tol.path_edge_bias))
-        inside = inside.reshape(rb.shape)
+        inside = inside.reshape(xb.shape)
         #Return 0-D ndarray for scalars which is truth-y; return mask array for higher dims.
-        return inside.item() if inside.ndim == 0 else inside
+        #If all is False, then combine all bools to single value.
+        if inside.ndim == 0:
+            return inside
+        else:
+            if combined:
+                return np.all(inside)
+            else:
+                return inside
 
-    def _vertex_bisector(self, Rb, Zb, j):
-        """Return angle bisector to image point given boundary points."""
-        #Need to ignore final (closure) point when considering last vertex.
-        #Note j here is the segment index.
-        jm = (j-1) % (self.num_pts-1)
-        jp = (j+1) % (self.num_pts-1)
-
-        # edge tangents (into and out of the vertex)
-        Tm = utils.unit([self.rbdy[j]-self.rbdy[jm], self.zbdy[j]-self.zbdy[jm]])
-        Tp = utils.unit([self.rbdy[jp]-self.rbdy[j], self.zbdy[jp]-self.zbdy[j]])
-
-        #Reverse first segment, treating vertex as origin.
-        #Sum unit vectors to get bisector.
-        B = -Tm + Tp
-        Bu = utils.unit(B)
-
-        #Need to deal with concave vs convex vertex.
-        #Test with tiny segment for inside since full value could lie outside if passing another wall.
-        if not self.contains(Rb + self.tol.path_tol*Bu[0], Zb + self.tol.path_tol*Bu[1]):
-            Bu = -Bu
-
-        return Bu
-
-    def _nearest_point_on_path(self, Rg, Zg):
-        """
-        Return (seg_index, t, Rb, Zb) where (Rb,Zb) is closest point on polyline to (Rg,Zg).
-
-        Vector formulation from wiki page "Distance from a point to a line". See image there for illustration.
-        Assuming eqn of line is x = a + tn for t in [0,1]:
-        (a-p)                  #Vector from point to line start.
-        (a-p) dot n            #Projection of a-p onto line 
-        (a-p) - ((a-p) dot n)n #Component of a-p perp to line!
-        """
-        g = np.array([Rg, Zg])
-        ga = self._a - g                  #Ghost point to seg start vectors
-        proj = np.sum(ga*self._n, axis=1) #Projection of vector along n.
-        perp = ga - proj[:, None]*self._n #Perp vector to add to g to get to intersection.
-
-        #Clamp point on line to endpoints. t = length along ab.
-        t_raw = np.sum(((g + perp - self._a)*self._d), axis=1)/self._dd #Vec formula for length along line.
-        before_cond = (t_raw < 0.0)[:,None]
-        after_cond  = (t_raw > 1.0)[:,None]
-        perp  = np.select([before_cond, after_cond], [self._a - g, self._b - g], default=perp)
-
-        # pick nearest segment
-        j = int(np.argmin(np.sum((perp)**2, axis=1)))
-
-        return j, t_raw[j], [float(perp[j,0]), float(perp[j,1])]
-
-    def _reflect_ghost_across_wall(self, Rg, Zg):
-        #Get info about intersection point. Segment index, location along segment,
-        #and normal vector from ghost to boundary.
-        idx_b, loc_b, n_b = self._nearest_point_on_path(Rg, Zg)
-        Rb, Zb = Rg + n_b[0], Zg + n_b[1]
-
-        #If boundary point is an endpoint, follow bisection angle.
-        #TODO: How to handle normal at vertex for BCs??? There is a way to do bisection
-        # and project the ghost onto the bisection vector apparently.
-        if (loc_b <= 0.0) or (loc_b >= 1.0):
-            utils.logger.debug(f"Vertex bisection for ghost point: {Rg,Zg}.")
-        #    utils.logger.debug(f"Calculating bisection vector for ghost point: {Rg,Zg}.")
-        #    if loc_b >= 1.0:
-        #        idx_b += 1
-        #    bsct = self._vertex_bisector(Rb, Zb, idx_b)
-        #    #Overwrite N_b with bisector.
-        #    N_len = np.sqrt(n_b[0]**2 + n_b[1]**2)
-        #    n_b[0], n_b[1] = N_len*bsct[0], N_len*bsct[1]
-
-        #Store image point.
-        Rimg, Zimg = Rb + n_b[0], Zb + n_b[1]
-
-        #Lastly, if image point is outside, remove half of image length successively.
-        #TODO: Find second intercept and go halfway between two boundaries?
-        #TODO: Update solver to handle different path lengths?
-        if not self.contains(Rimg, Zimg):
-            utils.logger.debug(f"Image point outside of domain for ghost point: {Rg,Zg}. \
-                               Try increasing resolution, generally 512x512 or 1024x1024 works.")
-        #    utils.logger.debug(f"Moving outer image point back in for ghost point: {Rg,Zg}.")
-        #    Rout,  Zout = Rimg - Rb, Zimg - Zb
-        #    Rimg, Zimg  = Rb + Rout/2, Zb + Zout/2
-
-        return (Rb, Zb), (Rimg, Zimg), (n_b[0], n_b[1])
-    
-    def get_image_pts(self, rpts: NDArray[np.floating], zpts: NDArray[np.floating],
-                        show=False) -> NDArray[np.bool_]:
-        """Generate mask of ghost points from wall and 2D gridpoint arrays."""
-        inside = self.contains(rpts, zpts)
-        #TODO: Use connectivity=4 for finding ghosts.
-        #TODO: Use conn=8 now for some ghosts. Wont be used in code loops but will be ghost cells?
-        #TODO: Have an issue when a second layer of ghost cells is needed at sharp areas.
-        neighbors_in = utils.neighbor_mask(inside, connectivity=8)
-        ghost_mask = (~inside) & neighbors_in
-
-        #Now generate mask for inside cells which touch outside ones.
-        outside = ~inside
-        neighbors_out = utils.neighbor_mask(outside, connectivity=8)
-        border_mask = inside & neighbors_out
-
-        #Get image points from ghost cells and wall points.
-        Rg = rpts[ghost_mask]
-        Zg = zpts[ghost_mask]
-        Rb, Zb     = np.empty_like(Rg), np.empty_like(Zg)
-        Rimg, Zimg = np.empty_like(Rg), np.empty_like(Zg)
-        Rn, Zn     = np.empty_like(Rb), np.empty_like(Zb)
-        for k, (rgi, zgi) in enumerate(zip(Rg, Zg)):
-            (Rb[k], Zb[k]), (Rimg[k], Zimg[k]), (Rn[k], Zn[k]) = self._reflect_ghost_across_wall(rgi, zgi)
-
-        if show:
-            fig, ax = plt.subplots(figsize=(8,6))
-            patch = PathPatch(self.path, facecolor='none', edgecolor='k', lw=2)
-            ax.add_patch(patch)
-
-            # ghost (green) and boundary-inside (blue)
-            ax.scatter(self.path.vertices[:,0], self.path.vertices[:,1], s=16, c='k', marker='o')
-            ax.scatter(rpts[ghost_mask],  zpts[ghost_mask],  s=16, c='g',   marker='o', label='ghost')
-            ax.scatter(rpts[border_mask], zpts[border_mask], s=16, c='blue',marker='o', label='inner')
-
-            # image points (red)
-            ax.scatter(Rimg, Zimg, s=20, c='red', marker='o', label='image')
-
-            # red intercept lines: ghost → boundary intercept
-            for rgi, zgi, rbi, zbi, rimi, zimi in zip(Rg, Zg, Rb, Zb, Rimg, Zimg):
-                ax.plot([rgi, rbi, rimi], [zgi, zbi, zimi], 'r-', lw=2, alpha=0.6)
-
-            ax.set_aspect('equal', 'box')
-            ax.set_xlabel('R')
-            ax.set_ylabel('Z')
-            ax.legend(loc='best')
-            plt.tight_layout()
-            plt.show()
-
-        return inside, ghost_mask, (Rg, Zg), (Rb, Zb), (Rimg, Zimg), (Rn, Zn)
+    def plot(self, ax=None, *, show_vertices: bool = True, **kwargs):
+        """Convenience plot for quick debugging."""
+        if ax is None:
+            _, ax = plt.subplots()
+        patch = PathPatch(self.path, facecolor="none", edgecolor="k", lw=2, **kwargs)
+        ax.add_patch(patch)
+        if show_vertices:
+            ax.scatter(self.path.vertices[:, 0], self.path.vertices[:, 1], s=12, c="k")
+        ax.set_aspect("equal", "box")
+        ax.set_xlabel("x")
+        ax.set_ylabel("z")
+        return ax

@@ -277,7 +277,7 @@ def clean_polygon(poly, eps=1e-12): #TODO: Use tolerance class? And for all eps 
         return np.empty((0, 2), dtype=float)
 
     # optional: check area; if essentially zero, treat as empty
-    A = polygon_area(cleaned)  # your existing area function
+    A = polygon_area_line_integral(cleaned)  # your existing area function
     if abs(A) < eps:
         return np.empty((0, 2), dtype=float)
 
@@ -311,6 +311,31 @@ def clip_polygon_to_rect(poly, x_min, x_max, z_min, z_max):
     poly = clean_polygon(poly)
 
     return poly
+
+def polygon_area_line_integral(poly):
+    """
+    Area of a simple polygon via line integral / Green's theorem:
+        A = 1/2 ∮ (x dz - z dx)
+          = 1/2 Σ (x_i z_{i+1} - z_i x_{i+1})
+
+    poly: (N,2) vertices, NOT necessarily closed. Works either way.
+    Returns non-negative area.
+    """
+    poly = np.asarray(poly, dtype=float)
+    if len(poly) < 3:
+        return 0.0
+
+    # ensure closed loop for the sum
+    if not np.allclose(poly[0], poly[-1], atol=1e-14):
+        V = np.vstack([poly, poly[0]])
+    else:
+        V = poly
+
+    x = V[:, 0]
+    z = V[:, 1]
+    A = 0.5 * np.sum(x[:-1] * z[1:] - z[:-1] * x[1:])
+    return float(abs(A))
+
 
 def polygon_area(poly):
     """
@@ -513,7 +538,7 @@ def compute_cutcell_fractions(xc, zc, dx, dz, bdry: bdy.PolygonBoundary):
             cell_poly = clip_polygon_to_rect(bdry.path.vertices,
                             x_min, x_max, z_min, z_max)
             
-            A = polygon_area(cell_poly) #TODO: Use built in function from bdy? But this is the cut piece in the plasma.
+            A = polygon_area_line_integral(cell_poly) #TODO: Use built in function from bdy? But this is the cut piece in the plasma.
             vol_frac[i, j] = A / (dx * dz)
 
             debug = False
@@ -569,7 +594,282 @@ def compute_cutcell_fractions(xc, zc, dx, dz, bdry: bdy.PolygonBoundary):
 
     return vol_frac, fx_plus_frac, fz_plus_frac
 
+def clip_segment_to_rect(P, Q, x_min, x_max, z_min, z_max, eps=1e-14):
+    """
+    Clip segment P->Q to axis-aligned rectangle.
+    Returns (hit, A, B, t0, t1) where A=P+t0*(Q-P), B=P+t1*(Q-P), and 0<=t0<=t1<=1.
+    """
+    P = np.asarray(P, float); Q = np.asarray(Q, float)
+    d = Q - P
+
+    t0, t1 = 0.0, 1.0
+    # inequalities: x_min <= x <= x_max, z_min <= z <= z_max
+    # written as:  p*t <= q  (Liang-Barsky form)
+    for p, q in [
+        (-d[0], P[0] - x_min),  # x >= x_min
+        ( d[0], x_max - P[0]),  # x <= x_max
+        (-d[1], P[1] - z_min),  # z >= z_min
+        ( d[1], z_max - P[1]),  # z <= z_max
+    ]:
+        if abs(p) < eps:
+            if q < 0:  # parallel and outside
+                return False, None, None, None, None
+        else:
+            r = q / p
+            if p < 0:
+                t0 = max(t0, r)
+            else:
+                t1 = min(t1, r)
+            if t0 - t1 > 1e-12:
+                return False, None, None, None, None
+
+    A = P + t0 * d
+    B = P + t1 * d
+    # reject essentially-zero length
+    if np.linalg.norm(B - A) < 1e-12:
+        return False, None, None, None, None
+    return True, A, B, t0, t1
+
+def eb_endpoints_longest_run(bdry_verts, x_min, x_max, z_min, z_max, eps=1e-14): #TODO: Fix eps to tols?
+    """
+    Walk boundary edges, clip each edge to the cell rectangle, merge consecutive inside pieces,
+    and return endpoints of the longest merged run.
+    """
+    V = np.asarray(bdry_verts, float)
+    n = len(V)
+    if n < 2:
+        return None, None
+
+    # collect inside pieces in boundary order: (k, t0, t1, A, B, len)
+    pieces = []
+    for k in range(n):
+        P = V[k]
+        Q = V[(k + 1) % n]
+        hit, A, B, t0, t1 = clip_segment_to_rect(P, Q, x_min, x_max, z_min, z_max, eps=eps)
+        if hit:
+            pieces.append((k, t0, t1, A, B, float(np.linalg.norm(B - A))))
+
+    if not pieces:
+        return None, None
+
+    # merge consecutive pieces along boundary index, allowing wrap by doubling list once
+    pieces.sort(key=lambda x: x[0])
+    pieces2 = pieces + [(k + n, t0, t1, A, B, L) for (k, t0, t1, A, B, L) in pieces]
+
+    best_L = -1.0
+    best_A = None
+    best_B = None
+
+    run_A = pieces2[0][3]
+    run_B = pieces2[0][4]
+    run_L = pieces2[0][5]
+    prev_k = pieces2[0][0]
+
+    def close_enough(p, q):
+        return np.linalg.norm(np.asarray(p) - np.asarray(q)) < 1e-10
+
+    for (k, t0, t1, A, B, L) in pieces2[1:]:
+        # stop after spanning more than one full loop
+        if k - pieces2[0][0] >= n:
+            break
+
+        consecutive = (k == prev_k + 1)
+        connected = close_enough(run_B, A)  # end touches next start
+
+        if consecutive and connected:
+            run_B = B
+            run_L += L
+        else:
+            if run_L > best_L:
+                best_L, best_A, best_B = run_L, run_A, run_B
+            run_A, run_B, run_L = A, B, L
+
+        prev_k = k
+
+    if run_L > best_L:
+        best_L, best_A, best_B = run_L, run_A, run_B
+
+    return best_A, best_B
+
+def rect_contains(p, x_min, x_max, z_min, z_max, eps=1e-14):
+    return (x_min - eps <= p[0] <= x_max + eps) and (z_min - eps <= p[1] <= z_max + eps)
+
+def seg_seg_intersection_param(p, r, q, s, eps=1e-14):
+    """Return (hit, t) where p+t r intersects q+u s, with t,u in [0,1]."""
+    rxs = r[0]*s[1] - r[1]*s[0]
+    if abs(rxs) < eps:
+        return False, None
+    qmp = q - p
+    t = (qmp[0]*s[1] - qmp[1]*s[0]) / rxs
+    u = (qmp[0]*r[1] - qmp[1]*r[0]) / rxs
+    if -1e-12 <= t <= 1+1e-12 and -1e-12 <= u <= 1+1e-12:
+        return True, min(max(t, 0.0), 1.0)
+    return False, None
+
+def point_on_poly(V, s):
+    """V: (n,2), s in [0,n)."""
+    n = len(V)
+    k = int(np.floor(s)) % n
+    t = s - np.floor(s)
+    return V[k] + t*(V[(k+1)%n] - V[k])
+
+def longest_inside_intervals_on_boundary(bdry_verts, x_min, x_max, z_min, z_max, eps=1e-14):
+    """
+    Return a list of endpoint pairs [(p0,p1), ...] for every contiguous boundary
+    interval that lies inside the rectangle [x_min,x_max] x [z_min,z_max].
+
+    Each p0,p1 is a numpy array (shape (2,)). If no interval is found, returns [].
+
+    This re-uses the same seg-seg intersection event method as your original,
+    but returns ALL intervals (not only the longest one).
+    """
+    V = np.asarray(bdry_verts, float)
+    n = len(V)
+    if n < 2:
+        return []
+
+    # rectangle edges
+    R = np.array([[x_min, z_min],
+                  [x_max, z_min],
+                  [x_max, z_max],
+                  [x_min, z_max]], float)
+    rect_edges = [(R[i], R[(i+1) % 4]) for i in range(4)]
+
+    # collect intersection "events" as (s_param, point)
+    events = []
+    for k in range(n):
+        p0 = V[k]; p1 = V[(k+1) % n]
+        p = p0; r = p1 - p0
+        for (q0, q1) in rect_edges:
+            q = q0; s = q1 - q0
+            hit, t = seg_seg_intersection_param(p, r, q, s, eps=eps)
+            if hit:
+                sp = k + t
+                events.append((sp, p0 + t*r))
+
+    # need at least two events to form an interval
+    if len(events) < 2:
+        return []
+
+    # sort and deduplicate by parameter s (corner hits can produce near-duplicate events)
+    events.sort(key=lambda x: x[0])
+    s_list = [events[0][0]]
+    p_list = [events[0][1]]
+    for sp, pt in events[1:]:
+        if abs(sp - s_list[-1]) > 1e-10:
+            s_list.append(sp); p_list.append(pt)
+        else:
+            # average near-duplicate intersection points (corner hits)
+            p_list[-1] = 0.5*(p_list[-1] + pt)
+
+    if len(s_list) < 2:
+        return []
+
+    # append wrap event to allow intervals that wrap across polygon index 0
+    s_ext = s_list + [s_list[0] + n]
+    p_ext = p_list + [p_list[0].copy()]
+
+    intervals = []
+
+    def rect_contains_local(p):
+        return rect_contains(p, x_min, x_max, z_min, z_max, eps=eps)
+
+    # For every adjacent event pair, test midpoint — if midpoint lies inside rect,
+    # the interval between those two events is an "inside" run.
+    for i in range(len(s_ext) - 1):
+        s0, s1 = s_ext[i], s_ext[i+1]
+        smid = 0.5 * (s0 + s1)
+        pmid = point_on_poly(V, smid)
+        if rect_contains_local(pmid):
+            intervals.append((p_ext[i].copy(), p_ext[i+1].copy()))
+
+    return intervals
+
+def longest_inside_interval_on_boundary(bdry_verts, x_min, x_max, z_min, z_max, eps=1e-14):
+    """
+    Return endpoints (p0,p1) of the *longest contiguous boundary interval*
+    that lies inside the rectangle, based on consecutive boundary/rect intersection events.
+    """
+    V = np.asarray(bdry_verts, float)
+    n = len(V)
+    if n < 2:
+        return None, None
+
+    # rectangle edges
+    R = np.array([[x_min,z_min],[x_max,z_min],[x_max,z_max],[x_min,z_max]], float)
+    rect_edges = [(R[i], R[(i+1)%4]) for i in range(4)]
+
+    # precompute edge lengths and cumulative arclength along polygon
+    elen = np.linalg.norm(np.roll(V,-1,axis=0) - V, axis=1)  # length of edge k
+
+    def arc_len(s0, s1):
+        """forward arclength from s0 to s1 where s1>=s0, allowing wrap via +n."""
+        k0 = int(np.floor(s0))
+        t0 = s0 - k0
+        k1 = int(np.floor(s1))
+        t1 = s1 - k1
+        # same edge
+        if k0 == k1:
+            return abs(t1 - t0) * elen[k0 % n]
+        L = (1.0 - t0) * elen[k0 % n]
+        # full edges between
+        for k in range(k0+1, k1):
+            L += elen[k % n]
+        # last partial
+        L += t1 * elen[k1 % n]
+        return L
+
+    # collect intersection "events" as (s_param, point)
+    events = []
+    for k in range(n):
+        p0 = V[k]; p1 = V[(k+1)%n]
+        p = p0; r = p1 - p0
+        for (q0,q1) in rect_edges:
+            q = q0; s = q1 - q0
+            hit, t = seg_seg_intersection_param(p, r, q, s, eps=eps)
+            if hit:
+                sp = k + t
+                events.append((sp, p0 + t*r))
+
+    if len(events) < 2:
+        return None, None
+
+    # sort and dedupe by s (corner hits create duplicates)
+    events.sort(key=lambda x: x[0])
+    s_list = [events[0][0]]
+    p_list = [events[0][1]]
+    for sp, pt in events[1:]:
+        if abs(sp - s_list[-1]) > 1e-10:
+            s_list.append(sp); p_list.append(pt)
+        else:
+            p_list[-1] = 0.5*(p_list[-1] + pt)
+
+    if len(s_list) < 2:
+        return None, None
+
+    # append wrap event
+    s_ext = s_list + [s_list[0] + n]
+    p_ext = p_list + [p_list[0].copy()]
+
+    bestL = -1.0
+    best = None
+
+    for i in range(len(s_ext)-1):
+        s0, s1 = s_ext[i], s_ext[i+1]
+        smid = 0.5*(s0 + s1)
+        pmid = point_on_poly(V, smid)
+        if rect_contains(pmid, x_min, x_max, z_min, z_max, eps=eps):
+            L = arc_len(s0, s1)
+            if L > bestL:
+                bestL = L
+                best = (p_ext[i].copy(), p_ext[i+1].copy())
+
+    return best if best is not None else (None, None)
+
 #TODO: Go through new code compared to old function and figure out what should be cleaned up from ChatGPT...
+#TODO: Update volume calculations to use Divergence Theorem and surface fluxes. Can test 3d volume this way.
+#TODO: For prev line, add cell intersections to polygon and use linear bdy approximation for volume and face factors.
+#TODO: Do interpolation at just far point from boundary normal, then midpt rule to get middle point?
 def compute_cutcell_fractions_with_bound(
     xc, zc, dx, dz, bdry: bdy.PolygonBoundary):
     """
@@ -612,7 +912,7 @@ def compute_cutcell_fractions_with_bound(
     weights = []
     ds_list = []
     cell_inds = []
-    segLs = []
+    segAs = []
 
     b = 0  # running boundary-cut index
     h = np.hypot(dx, dz) #Normal sampling distance for midpoints.
@@ -663,74 +963,84 @@ def compute_cutcell_fractions_with_bound(
                 fz_plus_frac[i, j] = 0.0
 
             # ---- EB endpoints inside this cell ----
-            hits = cell_boundary_intersections(
-                bdry.path.vertices, x_min, x_max, z_min, z_max
-            )
-            p0, p1 = furthest_pair(hits)
+            #hits = cell_boundary_intersections(
+            #    bdry.path.vertices, x_min, x_max, z_min, z_max
+            #)
+            #p0, p1 = furthest_pair(hits)
+            #p0, p1 = eb_endpoints_longest_run(bdry.path.vertices, x_min, x_max, z_min, z_max)
+            segments = longest_inside_intervals_on_boundary(
+            bdry.path.vertices, x_min, x_max, z_min, z_max)
 
-            if p0 is None:
-                # degenerate grazing case
+            if not segments:
+                # no (robust) EB segment inside this cell
                 continue
+            
+            # segments is a list of (p0, p1); process each separately
+            for (p0, p1) in segments:
+                seg = p1 - p0
+                segL = np.linalg.norm(seg)
+                if segL < 1e-14:
+                    continue
 
-            seg = p1 - p0
-            segL = np.linalg.norm(seg)
-            if segL < 1e-14:
-                continue
+                mid = 0.5 * (p0 + p1)
 
-            mid = 0.5 * (p0 + p1)
+                # normal from segment tangent
+                t = seg / segL
+                n = np.array([-t[1], t[0]], float)  # candidate normal (not yet oriented)
 
-            # normal from segment tangent
-            t = seg / segL
-            n = np.array([-t[1], t[0]], float)  # candidate normal (not yet oriented)
+                # orient to point inward (into plasma) using a finite step (more robust than tiny epsilon)
+                pA_test = mid + s1 * n
+                pB_test = mid + s2 * n
+                #TODO: Note there is a small gap b/w real boundary and approximate boundary.
+                #To be robust, test with small normal perturbation for inside approximate boundary after updating cut cell logic.
+                if (not bdry.contains(pA_test[0], pA_test[1])):
+                    n = -n
 
-            # orient to point inward (into plasma) using a finite step (more robust than tiny epsilon)
-            pA_test = mid + s1 * n
-            pB_test = mid + s2 * n
-            #TODO: What to do if res too low and points outside? Need to handle both checks.
-            if (not bdry.contains(pA_test[0], pA_test[1])):
-                n = -n
+                # sample points along inward normal in RZ
+                pA = mid + s1 * n
+                pB = mid + s2 * n
 
-            # sample points along inward normal in RZ
-            pA = mid + s1 * n
-            pB = mid + s2 * n
+                if ((not bdry.contains(pA[0], pA[1])) or \
+                    (not bdry.contains(pB[0], pB[1]))): 
+                    utils.logger.warn("Points along boundary normal not outside. Indicates resolution too low."
+                                      f"For boundary midpoint located at {mid[0], mid[1]}")
 
-            # bilinear interpolation weights in RZ (assumes xc/zc are uniform grids in RZ)
-            ai0, aj0, aw00, aw01, aw10, aw11 = bilinear_base_and_weights(
-                pA, xc, zc, dx, dz
-            )
-            bi0, bj0, bw00, bw01, bw10, bw11 = bilinear_base_and_weights(
-                pB, xc, zc, dx, dz
-            )
+                # bilinear interpolation weights in RZ (assumes xc/zc are uniform grids in RZ)
+                ai0, aj0, aw00, aw01, aw10, aw11 = bilinear_base_and_weights(
+                    pA, xc, zc, dx, dz)
+                bi0, bj0, bw00, bw01, bw10, bw11 = bilinear_base_and_weights(
+                    pB, xc, zc, dx, dz)
 
-            # store debug arrays
-            #TODO: Store more like mid_pts below. Dont need so many structures.
-            eb_p0x[i, j], eb_p0z[i, j] = p0
-            eb_p1x[i, j], eb_p1z[i, j] = p1
-            eb_mx[i, j],  eb_mz[i, j]  = mid
-            eb_nx[i, j],  eb_nz[i, j]  = n
-            eb_len[i, j] = segL
+                # store debug arrays
+                #TODO: Store more like mid_pts below. Dont need so many structures.
+                eb_p0x[i, j], eb_p0z[i, j] = p0
+                eb_p1x[i, j], eb_p1z[i, j] = p1
+                eb_mx[i, j],  eb_mz[i, j]  = mid
+                eb_nx[i, j],  eb_nz[i, j]  = n
+                eb_len[i, j] = segL
 
-            pAx[i, j], pAz[i, j] = pA
-            pBx[i, j], pBz[i, j] = pB
+                pAx[i, j], pAz[i, j] = pA
+                pBx[i, j], pBz[i, j] = pB
 
-            # record boundary cut index
-            bound_id[i, j] = b
-            cc_mask[i, j] = 1.0
+                # record boundary cut index
+                bound_id[i, j] = b
+                cc_mask[i, j] = 1.0
 
-            mid_pts.append([mid[0], mid[1]])
-            norms.append([n[0], n[1]])
-            base_inds.append([ai0, aj0, bi0, bj0])
+                mid_pts.append([mid[0], mid[1]])
+                norms.append([n[0], n[1]])
+                base_inds.append([ai0, aj0, bi0, bj0])
 
-            # Pack weights: A then B. (Keep your preferred ordering consistent with C++)
-            # Here: w00,w01,w10,w11 for each point
-            weights.append([aw00, aw01, aw10, aw11,
-                            bw00, bw01, bw10, bw11])
+                # Pack weights: A then B. (Keep your preferred ordering consistent with C++)
+                # Here: w00,w01,w10,w11 for each point
+                weights.append([aw00, aw01, aw10, aw11,
+                                bw00, bw01, bw10, bw11])
 
-            ds_list.append(s2 - s1)
-            segLs.append(segL)
-            cell_inds.append([i, j])
+                ds_list.append(s2 - s1)
+                #Convert length to area by multiplying by R factor at midpoint (x location)
+                segAs.append(segL*mid[0])
+                cell_inds.append([i, j])
 
-            b += 1
+                b += 1
 
     # Clip fractions to [0,1]
     vol_frac = clip_cuts(vol_frac)
@@ -742,6 +1052,7 @@ def compute_cutcell_fractions_with_bound(
     out_mask = vol_frac < vol_eps
     vol_frac[out_mask] = 1.0
 
+    #TODO: Throw res. warning if either two points outside boundary...
     if utils.DEBUG_FLAG:
         print("Plotting cut cell volume fractions and faces...")
         plot_volume_fractions(xc, zc, dx, dz, vol_frac, bdry)
@@ -757,12 +1068,12 @@ def compute_cutcell_fractions_with_bound(
         "nb": b,
         "mid_pts": np.asarray(mid_pts, float),     # (nb,2) in RZ
         "bnorms":  np.asarray(norms, float),       # (nb,2) in RZ (unit-ish; depends on cell scaling)
-        "bd_len":  np.asarray(segLs, float),       # (nb,) in RZ
+        "bd_area":  np.asarray(segAs, float),       # (nb,) in RZ
         "s1": float(s1),
         "s2": float(s2),
         "ds": np.asarray(ds_list, float),
         "bweights": np.asarray(weights, float),    # (nb,8) A(4) + B(4)
-        "base_inds": np.asarray(base_inds, float),   # (nb,4)
+        "base_inds": np.asarray(base_inds, float), # (nb,4)
         "cell_inds": np.asarray(cell_inds, int),   # (nb,2)
         "cc_mask": cc_mask,
     }

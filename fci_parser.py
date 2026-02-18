@@ -14,11 +14,18 @@ class ArgParser():
         p.add_argument("--debug", action=argparse.BooleanOptionalAction,
                 default=False, help="Enable debug logging and plotting.")
         p.add_argument("--gfile", type=str, default=str(utils.DEFAULT_GFILE),
-                help=(f"EQDSK file name. Examples: 'TokData/DIIID/g174791.03000', 'TokData/TCV/65402_t1.eqdsk'."))
+                help=("EQDSK file name. Examples: 'TokData/DIIID/g174791.03000', 'TokData/TCV/65402_t1.eqdsk'."))
 
-        p.add_argument("--nr",   type=int, default=utils.DEFAULT_NR,   help="Horizontal gridpoints (R).")
-        p.add_argument("--nphi", type=int, default=utils.DEFAULT_NPHI, help="Toroidal gridpoints (phi).")
-        p.add_argument("--nz",   type=int, default=utils.DEFAULT_NZ,   help="Vertical gridpoints (Z).")
+        #TODO: Allow for passing single perp resolution --n? Match x and z before ghosts, dont need x==z as in zoidberg?
+        p.add_argument("--nx", type=int, default=utils.DEFAULT_NX, help="Horizontal gridpoints (x).")
+        p.add_argument("--ny", type=int, default=utils.DEFAULT_NY, help="Parallel gridpoints (y).")
+        p.add_argument("--nz", type=int, default=utils.DEFAULT_NZ, help="Vertical gridpoints (z).")
+
+        #Allow for custom domain if needed. Useful for MMS testing.
+        p.add_argument("--x0", type=float, default=utils.DEFAULT_START, help="Left end of domain.")
+        p.add_argument("--x1", type=float, default=utils.DEFAULT_STOP,  help="Right end of domain.")
+        p.add_argument("--z0", type=float, default=utils.DEFAULT_START, help="Top of domain.")
+        p.add_argument("--z1", type=float, default=utils.DEFAULT_STOP,  help="Bottom of domain.")
 
         self.parser = p
 
@@ -50,8 +57,8 @@ class ArgParser():
         #Validate parameters.
         gpath = self._gfile_valid(args.gfile)
         args.gfilename = gpath.name #Store the filename from the path.
-        self._pow2_int(args.nr)
-        self._pow2_int(args.nphi)
+        self._pow2_int(args.nx)
+        self._pow2_int(args.ny)
         self._pow2_int(args.nz)
 
         return args
