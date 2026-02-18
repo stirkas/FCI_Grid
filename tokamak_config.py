@@ -115,7 +115,6 @@ class TokamakConfig(SimConfig):
                 raise ValueError("TCV field following doesnt always work great, increasing parallel res helps. Forcing ny >= 128 for now.")
             #TCV sharp areas.
             utils.logger.info("Removing sharp features manually from TCV wall. Check ok with --debug.")
-            targets = np.array([(1.8747, -0.3847)])
             targets = [] 
             for i, xpt in enumerate(x):
                 #Remove all points within this larger region to clean up the shape.
