@@ -129,7 +129,7 @@ class SimConfig(ABC):
 
     def write_output(self, device: Device, bout_io: BOUT_IO) -> None:
         #Write output to data file.
-        gridfile = "out/" + self.filename + ".fci.nc"
+        gridfile = self.filename + ".fci.nc"
         print("Writing to " + str(gridfile) + "...")
         with bdata.DataFile(gridfile, write=True, create=True, format="NETCDF4") as f:
             f.write_file_attribute("title", "BOUT++ FCI grid file")
