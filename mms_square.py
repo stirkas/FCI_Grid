@@ -9,10 +9,12 @@ def main(args):
         utils.DEBUG_FLAG = True
         utils.logger.min_level = utils.logger.Level.DEBUG
 
+    #TODO: Force frac=False and use hardcoded values for now to keep bdy constant.
     cfg = UniformLinearConfig(
         nx=args.nx, nz=args.nz, ny=1,
         xmin=args.x0, xmax=args.x1, zmin=args.z0, zmax=args.z1,
-        bdy_cfg = RectBoundaryConfig())
+        bdy_cfg = RectBoundaryConfig(frac=False),
+        filename='square')
 
     cfg.generate()
 

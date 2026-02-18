@@ -12,7 +12,8 @@ def main(args):
     cfg = UniformLinearConfig(
         nx=args.nx, nz=args.nz, ny=1,
         xmin=args.x0, xmax=args.x1, zmin=args.z0, zmax=args.z1,
-        bdy_cfg = RectBoundaryConfig(mode='faces'))
+        bdy_cfg = RectBoundaryConfig(mode='faces'),
+        filename='square_face')
 
     cfg.generate()
 

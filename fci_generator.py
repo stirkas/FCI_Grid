@@ -242,7 +242,7 @@ class FCI_Generator:
         #Also fix TCV/DIIID cut-cell issues? Saw problems with cut face logic. With low res sometimes have two intersection points...
         vol_frac, fx_plus_frac, fz_plus_frac, geom = \
             cc.compute_cutcell_fractions_with_bound(grid.x,
-                grid.z, grid.dx, grid.dz, self.wall)
+                grid.z, grid.dx, grid.dz, self.wall, self.dvc_info.toroidal)
 
         #Store cut-cell boundary info
         #TODO: Find better way to make3d? So dont need name?

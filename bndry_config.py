@@ -130,7 +130,6 @@ class CircleBoundaryConfig(BaseBoundaryConfig):
 
     def _make_vals(self, x0: float, z0: float, a: float) -> CoordPairs:
         """Create coordinate pairs from configuration data."""
-        #Force endpoint so the boundary is closed.
         th = np.linspace(0.0, 2.0 * np.pi, self.n, endpoint=False)
         if not self.ccw:
             th = th[::-1]

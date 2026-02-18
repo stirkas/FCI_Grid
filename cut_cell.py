@@ -871,7 +871,7 @@ def longest_inside_interval_on_boundary(bdry_verts, x_min, x_max, z_min, z_max, 
 #TODO: For prev line, add cell intersections to polygon and use linear bdy approximation for volume and face factors.
 #TODO: Do interpolation at just far point from boundary normal, then midpt rule to get middle point?
 def compute_cutcell_fractions_with_bound(
-    xc, zc, dx, dz, bdry: bdy.PolygonBoundary):
+    xc, zc, dx, dz, bdry: bdy.PolygonBoundary, toroidal: bool):
     """
     Pure (R,Z) version.
 
@@ -882,8 +882,6 @@ def compute_cutcell_fractions_with_bound(
     geom includes EB midpoint/normal and bilinear interpolation weights for two
     points along inward normal for each CUT cell.
     """
-    import numpy as np
-
     nx = len(xc)
     nz = len(zc)
 
@@ -1037,7 +1035,8 @@ def compute_cutcell_fractions_with_bound(
 
                 ds_list.append(s2 - s1)
                 #Convert length to area by multiplying by R factor at midpoint (x location)
-                segAs.append(segL*mid[0])
+                segA = segL if toroidal is not True else segL*mid[0]
+                segAs.append(segA)
                 cell_inds.append([i, j])
 
                 b += 1
